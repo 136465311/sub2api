@@ -377,6 +377,7 @@ export default {
     dashboard: 'Dashboard',
     announcements: 'Announcements',
     apiKeys: 'API Keys',
+    aiChat: 'AI Chat',
     usage: 'Usage',
     redeem: 'Redeem',
     affiliate: 'Affiliate Rebates',
@@ -636,6 +637,36 @@ export default {
     invalidResetLinkHint: 'This password reset link is invalid or has expired. Please request a new one.',
     requestNewResetLink: 'Request New Reset Link',
     invalidOrExpiredToken: 'The password reset link is invalid or has expired. Please request a new one.'
+  },
+
+  // AI Chat
+  aiChat: {
+    title: 'AI Chat',
+    description: 'Chat with available models using your account balance.',
+    conversations: 'Conversations',
+    newConversation: 'New Chat',
+    deleteConversation: 'Delete Conversation',
+    deleteConfirm: 'Delete this conversation? This action cannot be undone.',
+    noConversations: 'No conversations yet',
+    modelGroup: 'Group',
+    model: 'Model',
+    selectGroup: 'Select group',
+    selectModel: 'Select model',
+    noModels: 'No available models',
+    noModel: 'No model',
+    loadingModels: 'Loading models...',
+    inputPlaceholder: 'Send a message...',
+    send: 'Send',
+    stop: 'Stop',
+    you: 'You',
+    assistant: 'Assistant',
+    emptyTitle: 'Start a conversation',
+    emptyDescription: 'Choose a group and model, then send your first message.',
+    loadFailed: 'Failed to load AI chat data',
+    sendFailed: 'Failed to send message',
+    deleteFailed: 'Failed to delete conversation',
+    untitled: 'New chat',
+    streaming: 'Generating...'
   },
 
   // Dashboard

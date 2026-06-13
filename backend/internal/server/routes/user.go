@@ -1,6 +1,7 @@
 package routes
 
 import (
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -13,7 +14,10 @@ func RegisterUserRoutes(
 	v1 *gin.RouterGroup,
 	h *handler.Handlers,
 	jwtAuth middleware.JWTAuthMiddleware,
+	apiKeyAuth middleware.APIKeyAuthMiddleware,
+	opsService *service.OpsService,
 	settingService *service.SettingService,
+	cfg *config.Config,
 ) {
 	authenticated := v1.Group("")
 	authenticated.Use(gin.HandlerFunc(jwtAuth))
@@ -33,6 +37,30 @@ func RegisterUserRoutes(
 			user.POST("/auth-identities/bind/start", h.User.StartIdentityBinding)
 			user.GET("/api-keys/:id/usage/daily", h.Usage.GetMyAPIKeyDailyUsage)
 			user.GET("/platform-quotas", h.User.GetMyPlatformQuotas)
+			user.GET("/ai/models", h.UserAI.Models)
+
+			chat := user.Group("/chat")
+			{
+				chat.GET("/conversations", h.UserAI.ListChatConversations)
+				chat.POST("/conversations", h.UserAI.CreateChatConversation)
+				chat.DELETE("/conversations/:id", h.UserAI.DeleteChatConversation)
+			}
+
+			bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize)
+			clientRequestID := middleware.ClientRequestID()
+			opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
+			endpointNorm := handler.InboundEndpointMiddleware()
+			requireGroupAnthropic := middleware.RequireGroupAssignment(settingService, middleware.AnthropicErrorWriter)
+			user.POST("/chat/completions",
+				bodyLimit,
+				clientRequestID,
+				opsErrorLogger,
+				endpointNorm,
+				h.UserAI.PrepareChatCompletionsProxy,
+				gin.HandlerFunc(apiKeyAuth),
+				requireGroupAnthropic,
+				h.UserAI.ChatCompletions,
+			)
 
 			// 通知邮箱管理
 			notifyEmail := user.Group("/notify-email")

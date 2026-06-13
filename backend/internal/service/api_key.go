@@ -14,6 +14,11 @@ const (
 	StatusAPIKeyExpired        = "expired"
 )
 
+const (
+	APIKeySourceUser   = "user"
+	APIKeySourceUserAI = "user_ai"
+)
+
 // Rate limit window durations
 const (
 	RateLimitWindow5h = 5 * time.Hour
@@ -32,6 +37,7 @@ type APIKey struct {
 	UserID      int64
 	Key         string
 	Name        string
+	Source      string
 	GroupID     *int64
 	Status      string
 	IPWhitelist []string
@@ -64,6 +70,13 @@ type APIKey struct {
 
 func (k *APIKey) IsActive() bool {
 	return k.Status == StatusActive
+}
+
+func (k *APIKey) IsInternal() bool {
+	if k == nil {
+		return false
+	}
+	return k.Source != "" && k.Source != APIKeySourceUser
 }
 
 // HasRateLimits returns true if any rate limit window is configured

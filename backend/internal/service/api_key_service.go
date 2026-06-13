@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html"
 	"strconv"
@@ -54,6 +55,7 @@ type APIKeyRepository interface {
 	GetByKey(ctx context.Context, key string) (*APIKey, error)
 	// GetByKeyForAuth 认证专用查询，返回最小字段集
 	GetByKeyForAuth(ctx context.Context, key string) (*APIKey, error)
+	GetBySourceForUserGroup(ctx context.Context, userID int64, groupID *int64, source string) (*APIKey, error)
 	Update(ctx context.Context, key *APIKey) error
 	Delete(ctx context.Context, id int64) error
 	// DeleteWithAudit 在同一事务内先写 deleted_api_key_audits 审计、再软删除该 key。
@@ -154,6 +156,7 @@ type APIKeyAuthCacheInvalidator interface {
 type CreateAPIKeyRequest struct {
 	Name        string   `json:"name"`
 	GroupID     *int64   `json:"group_id"`
+	Source      string   `json:"-"`
 	CustomKey   *string  `json:"custom_key"`   // 可选的自定义key
 	IPWhitelist []string `json:"ip_whitelist"` // IP 白名单
 	IPBlacklist []string `json:"ip_blacklist"` // IP 黑名单
@@ -403,6 +406,7 @@ func (s *APIKeyService) Create(ctx context.Context, userID int64, req CreateAPIK
 		UserID:      userID,
 		Key:         key,
 		Name:        html.EscapeString(req.Name),
+		Source:      normalizeAPIKeySource(req.Source),
 		GroupID:     req.GroupID,
 		Status:      StatusActive,
 		IPWhitelist: req.IPWhitelist,
@@ -439,6 +443,41 @@ func (s *APIKeyService) List(ctx context.Context, userID int64, params paginatio
 	return keys, pagination, nil
 }
 
+func normalizeAPIKeySource(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return APIKeySourceUser
+	}
+	return source
+}
+
+func (s *APIKeyService) GetOrCreateUserAIInternalKey(ctx context.Context, userID int64, groupID *int64) (*APIKey, error) {
+	key, err := s.apiKeyRepo.GetBySourceForUserGroup(ctx, userID, groupID, APIKeySourceUserAI)
+	if err == nil {
+		s.compileAPIKeyIPRules(key)
+		return key, nil
+	}
+	if err != nil && !errors.Is(err, ErrAPIKeyNotFound) {
+		return nil, fmt.Errorf("get internal user ai key: %w", err)
+	}
+
+	created, createErr := s.Create(ctx, userID, CreateAPIKeyRequest{
+		Name:    "TransitAI Internal",
+		GroupID: groupID,
+		Source:  APIKeySourceUserAI,
+	})
+	if createErr == nil {
+		return created, nil
+	}
+
+	key, err = s.apiKeyRepo.GetBySourceForUserGroup(ctx, userID, groupID, APIKeySourceUserAI)
+	if err == nil {
+		s.compileAPIKeyIPRules(key)
+		return key, nil
+	}
+	return nil, fmt.Errorf("create internal user ai key: %w", createErr)
+}
+
 func (s *APIKeyService) VerifyOwnership(ctx context.Context, userID int64, apiKeyIDs []int64) ([]int64, error) {
 	if len(apiKeyIDs) == 0 {
 		return []int64{}, nil
@@ -459,6 +498,17 @@ func (s *APIKeyService) GetByID(ctx context.Context, id int64) (*APIKey, error) 
 	}
 	s.compileAPIKeyIPRules(apiKey)
 	return apiKey, nil
+}
+
+func (s *APIKeyService) GetUserVisibleByID(ctx context.Context, userID, id int64) (*APIKey, error) {
+	validIDs, err := s.apiKeyRepo.VerifyOwnership(ctx, userID, []int64{id})
+	if err != nil {
+		return nil, fmt.Errorf("verify api key ownership: %w", err)
+	}
+	if len(validIDs) == 0 {
+		return nil, ErrAPIKeyNotFound
+	}
+	return s.GetByID(ctx, id)
 }
 
 // GetByKey 根据Key字符串获取API Key（用于认证）
@@ -515,7 +565,7 @@ func (s *APIKeyService) GetByKey(ctx context.Context, key string) (*APIKey, erro
 
 // Update 更新API Key
 func (s *APIKeyService) Update(ctx context.Context, id int64, userID int64, req UpdateAPIKeyRequest) (*APIKey, error) {
-	apiKey, err := s.apiKeyRepo.GetByID(ctx, id)
+	apiKey, err := s.GetUserVisibleByID(ctx, userID, id)
 	if err != nil {
 		return nil, fmt.Errorf("get api key: %w", err)
 	}

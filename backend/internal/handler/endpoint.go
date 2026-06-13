@@ -45,7 +45,7 @@ func NormalizeInboundEndpoint(path string) string {
 	switch {
 	case strings.Contains(path, EndpointEmbeddings):
 		return EndpointEmbeddings
-	case strings.Contains(path, EndpointChatCompletions):
+	case strings.Contains(path, EndpointChatCompletions) || strings.Contains(path, "/chat/completions"):
 		return EndpointChatCompletions
 	case strings.Contains(path, EndpointMessages):
 		return EndpointMessages

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -383,8 +382,8 @@ func (s *HTTPUpstreamSuite) TestEvictOverLimitRemovesOldestIdle() {
 	// 创建两个客户端，设置不同的最后使用时间
 	entry1 := mustGetOrCreateClient(s.T(), svc, "http://proxy-a:8080", 1, 1)
 	entry2 := mustGetOrCreateClient(s.T(), svc, "http://proxy-b:8080", 2, 1)
-	atomic.StoreInt64(&entry1.lastUsed, time.Now().Add(-2*time.Hour).UnixNano()) // 最久
-	atomic.StoreInt64(&entry2.lastUsed, time.Now().Add(-time.Hour).UnixNano())
+	entry1.lastUsed.Store(time.Now().Add(-2 * time.Hour).UnixNano()) // 最久
+	entry2.lastUsed.Store(time.Now().Add(-time.Hour).UnixNano())
 	// 创建第三个客户端，触发淘汰
 	_ = mustGetOrCreateClient(s.T(), svc, "http://proxy-c:8080", 3, 1)
 
@@ -402,8 +401,8 @@ func (s *HTTPUpstreamSuite) TestIdleTTLDoesNotEvictActive() {
 	svc := s.newService()
 	entry1 := mustGetOrCreateClient(s.T(), svc, "", 1, 1)
 	// 设置为很久之前使用，但有活跃请求
-	atomic.StoreInt64(&entry1.lastUsed, time.Now().Add(-2*time.Minute).UnixNano())
-	atomic.StoreInt64(&entry1.inFlight, 1) // 模拟有活跃请求
+	entry1.lastUsed.Store(time.Now().Add(-2 * time.Minute).UnixNano())
+	entry1.inFlight.Store(1) // 模拟有活跃请求
 	// 创建新客户端，触发淘汰检查
 	_, _ = svc.getOrCreateClient("", 2, 1)
 

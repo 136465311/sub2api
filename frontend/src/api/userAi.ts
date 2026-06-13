@@ -1,0 +1,249 @@
+import { apiClient } from './client'
+import { getLocale } from '@/i18n'
+import type { PaginatedResponse } from '@/types'
+
+export interface AIModelGroup {
+  id: number
+  name: string
+  platform: string
+  models: string[]
+}
+
+export interface AIModelsResult {
+  groups: AIModelGroup[]
+  default_group_id?: number | null
+  default_model?: string
+}
+
+export interface AIChatMessage {
+  id: number
+  conversation_id: number
+  user_id: number
+  role: string
+  content: string
+  model: string
+  created_at: string
+  updated_at: string
+}
+
+export interface AIConversation {
+  id: number
+  user_id: number
+  group_id: number | null
+  title: string
+  model: string
+  created_at: string
+  updated_at: string
+  messages: AIChatMessage[]
+}
+
+export interface CreateConversationPayload {
+  title?: string
+  model?: string
+  group_id?: number | null
+}
+
+export interface ChatCompletionMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+export interface StreamChatCompletionPayload {
+  model: string
+  group_id?: number | null
+  conversation_id?: number | null
+  messages: ChatCompletionMessage[]
+  stream?: boolean
+}
+
+export interface StreamChatCompletionOptions {
+  signal?: AbortSignal
+  onDelta?: (delta: string) => void
+}
+
+type RawRecord = Record<string, any>
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '')
+
+function toNumber(value: unknown, fallback = 0): number {
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function toNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  const n = Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+function normalizeMessage(raw: RawRecord): AIChatMessage {
+  return {
+    id: toNumber(raw.id ?? raw.ID),
+    conversation_id: toNumber(raw.conversation_id ?? raw.ConversationID),
+    user_id: toNumber(raw.user_id ?? raw.UserID),
+    role: String(raw.role ?? raw.Role ?? ''),
+    content: String(raw.content ?? raw.Content ?? ''),
+    model: String(raw.model ?? raw.Model ?? ''),
+    created_at: String(raw.created_at ?? raw.CreatedAt ?? ''),
+    updated_at: String(raw.updated_at ?? raw.UpdatedAt ?? '')
+  }
+}
+
+function normalizeConversation(raw: RawRecord): AIConversation {
+  const messages = raw.messages ?? raw.Messages ?? []
+  return {
+    id: toNumber(raw.id ?? raw.ID),
+    user_id: toNumber(raw.user_id ?? raw.UserID),
+    group_id: toNullableNumber(raw.group_id ?? raw.GroupID),
+    title: String(raw.title ?? raw.Title ?? ''),
+    model: String(raw.model ?? raw.Model ?? ''),
+    created_at: String(raw.created_at ?? raw.CreatedAt ?? ''),
+    updated_at: String(raw.updated_at ?? raw.UpdatedAt ?? ''),
+    messages: Array.isArray(messages) ? messages.map((item) => normalizeMessage(item)) : []
+  }
+}
+
+function authHeaders(): HeadersInit {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+    'Accept-Language': getLocale()
+  }
+  const token = localStorage.getItem('auth_token')
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+  return headers
+}
+
+function extractAssistantContent(payload: any): string {
+  const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null
+  return String(
+    choice?.delta?.content ??
+      choice?.message?.content ??
+      payload?.delta?.content ??
+      payload?.message?.content ??
+      payload?.output_text ??
+      ''
+  )
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  const text = await response.text()
+  if (!text) return response.statusText || `HTTP ${response.status}`
+  try {
+    const data = JSON.parse(text)
+    return data?.message || data?.detail || data?.error || response.statusText || `HTTP ${response.status}`
+  } catch {
+    return text
+  }
+}
+
+function parseSSEFrame(frame: string, onDelta?: (delta: string) => void): string {
+  let fullText = ''
+  for (const line of frame.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (!trimmed.startsWith('data:')) continue
+
+    const data = trimmed.slice(5).trim()
+    if (!data || data === '[DONE]') continue
+
+    try {
+      const payload = JSON.parse(data)
+      const delta = extractAssistantContent(payload)
+      if (delta) {
+        fullText += delta
+        onDelta?.(delta)
+      }
+    } catch {
+      // Ignore malformed stream frames; the backend may also emit event metadata.
+    }
+  }
+  return fullText
+}
+
+export const userAiAPI = {
+  async getModels(): Promise<AIModelsResult> {
+    return apiClient.get('/user/ai/models').then((res) => res.data)
+  },
+
+  async listConversations(page = 1, pageSize = 50): Promise<PaginatedResponse<AIConversation>> {
+    const res = await apiClient.get('/user/chat/conversations', {
+      params: { page, page_size: pageSize }
+    })
+    const data = res.data as PaginatedResponse<RawRecord>
+    return {
+      ...data,
+      items: Array.isArray(data.items) ? data.items.map((item) => normalizeConversation(item)) : []
+    }
+  },
+
+  async createConversation(payload: CreateConversationPayload): Promise<AIConversation> {
+    const res = await apiClient.post('/user/chat/conversations', payload)
+    return normalizeConversation(res.data as RawRecord)
+  },
+
+  async deleteConversation(id: number): Promise<void> {
+    await apiClient.delete(`/user/chat/conversations/${id}`)
+  },
+
+  async streamChatCompletions(
+    payload: StreamChatCompletionPayload,
+    options: StreamChatCompletionOptions = {}
+  ): Promise<string> {
+    const response = await fetch(`${API_BASE_URL}/user/chat/completions`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: authHeaders(),
+      body: JSON.stringify({ ...payload, stream: true }),
+      signal: options.signal
+    })
+
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response))
+    }
+
+    if (!response.body) {
+      const data = await response.json()
+      const content = extractAssistantContent(data)
+      if (content) options.onDelta?.(content)
+      return content
+    }
+
+    const contentType = response.headers.get('content-type') || ''
+    if (!contentType.includes('text/event-stream')) {
+      const text = await response.text()
+      try {
+        const content = extractAssistantContent(JSON.parse(text))
+        if (content) options.onDelta?.(content)
+        return content
+      } catch {
+        if (text) options.onDelta?.(text)
+        return text
+      }
+    }
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let fullText = ''
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const frames = buffer.split(/\r?\n\r?\n/)
+      buffer = frames.pop() || ''
+      for (const frame of frames) {
+        fullText += parseSSEFrame(frame, options.onDelta)
+      }
+    }
+
+    if (buffer.trim()) {
+      fullText += parseSSEFrame(buffer, options.onDelta)
+    }
+
+    return fullText
+  }
+}

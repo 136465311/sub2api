@@ -377,6 +377,7 @@ export default {
     dashboard: '仪表盘',
     announcements: '公告',
     apiKeys: 'API 密钥',
+    aiChat: 'AI聊天',
     usage: '使用记录',
     redeem: '兑换',
     affiliate: '邀请返利',
@@ -635,6 +636,36 @@ export default {
     invalidResetLinkHint: '此密码重置链接无效或已过期。请重新请求一个新链接。',
     requestNewResetLink: '请求新的重置链接',
     invalidOrExpiredToken: '密码重置链接无效或已过期。请重新请求一个新链接。'
+  },
+
+  // AI Chat
+  aiChat: {
+    title: 'AI聊天',
+    description: '使用账户余额与可用模型对话。',
+    conversations: '会话',
+    newConversation: '新建会话',
+    deleteConversation: '删除会话',
+    deleteConfirm: '确定删除这个会话吗？此操作无法撤销。',
+    noConversations: '暂无会话',
+    modelGroup: '分组',
+    model: '模型',
+    selectGroup: '选择分组',
+    selectModel: '选择模型',
+    noModels: '暂无可用模型',
+    noModel: '未选择模型',
+    loadingModels: '正在加载模型...',
+    inputPlaceholder: '输入消息...',
+    send: '发送',
+    stop: '停止',
+    you: '你',
+    assistant: '助手',
+    emptyTitle: '开始对话',
+    emptyDescription: '选择分组和模型后发送第一条消息。',
+    loadFailed: '加载 AI 聊天数据失败',
+    sendFailed: '发送消息失败',
+    deleteFailed: '删除会话失败',
+    untitled: '新会话',
+    streaming: '生成中...'
   },
 
   // Dashboard

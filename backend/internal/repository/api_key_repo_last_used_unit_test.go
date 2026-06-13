@@ -30,7 +30,7 @@ func newAPIKeyRepoSQLite(t *testing.T) (*apiKeyRepository, *dbent.Client) {
 	client := enttest.NewClient(t, enttest.WithOptions(dbent.Driver(drv)))
 	t.Cleanup(func() { _ = client.Close() })
 
-	return &apiKeyRepository{client: client}, client
+	return NewAPIKeyRepository(client, db).(*apiKeyRepository), client
 }
 
 func mustCreateAPIKeyRepoUser(t *testing.T, ctx context.Context, client *dbent.Client, email string) *service.User {
@@ -112,6 +112,34 @@ func TestAPIKeyRepository_UpdateLastUsedDeletedKey(t *testing.T) {
 
 	err := repo.UpdateLastUsed(ctx, key.ID, time.Now().UTC())
 	require.ErrorIs(t, err, service.ErrAPIKeyNotFound)
+}
+
+func TestAPIKeyRepository_VerifyOwnershipHidesInternalKey(t *testing.T) {
+	repo, client := newAPIKeyRepoSQLite(t)
+	ctx := context.Background()
+	user := mustCreateAPIKeyRepoUser(t, ctx, client, "source-filter@test.com")
+
+	visible := &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-source-visible",
+		Name:   "Visible",
+		Status: service.StatusActive,
+	}
+	require.NoError(t, repo.Create(ctx, visible))
+
+	internal := &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-source-internal",
+		Name:   "Internal",
+		Source: service.APIKeySourceUserAI,
+		Status: service.StatusActive,
+	}
+	require.NoError(t, repo.Create(ctx, internal))
+
+	ids, err := repo.VerifyOwnership(ctx, user.ID, []int64{visible.ID, internal.ID})
+
+	require.NoError(t, err)
+	require.Equal(t, []int64{visible.ID}, ids)
 }
 
 func TestAPIKeyRepository_UpdateLastUsedDBError(t *testing.T) {

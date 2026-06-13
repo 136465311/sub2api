@@ -91,8 +91,8 @@ type upstreamClientEntry struct {
 	proxyKey     string       // 代理标识（用于检测代理变更）
 	poolKey      string       // 连接池配置标识（用于检测配置变更）
 	protocolMode string       // 协议模式（default/openai_h1/openai_h2/openai_h1_fallback）
-	lastUsed     int64        // 最后使用时间戳（纳秒），用于 LRU 淘汰
-	inFlight     int64        // 当前进行中的请求数，>0 时不可淘汰
+	lastUsed     atomic.Int64 // 最后使用时间戳（纳秒），用于 LRU 淘汰
+	inFlight     atomic.Int64 // 当前进行中的请求数，>0 时不可淘汰
 }
 
 type openAIHTTP2FallbackState struct {
@@ -178,8 +178,8 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	if err != nil {
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
 		// 请求失败，立即减少计数
-		atomic.AddInt64(&entry.inFlight, -1)
-		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		entry.inFlight.Add(-1)
+		entry.lastUsed.Store(time.Now().UnixNano())
 		return nil, err
 	}
 	s.recordOpenAIHTTP2Success(profile, entry.protocolMode, entry.proxyKey)
@@ -190,8 +190,8 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	// 包装响应体，在关闭时自动减少计数并更新时间戳
 	// 这确保了流式响应（如 SSE）在完全读取前不会被淘汰
 	resp.Body = wrapTrackedBody(resp.Body, func() {
-		atomic.AddInt64(&entry.inFlight, -1)
-		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		entry.inFlight.Add(-1)
+		entry.lastUsed.Store(time.Now().UnixNano())
 	})
 
 	return resp, nil
@@ -232,8 +232,8 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 
 	resp, err := entry.client.Do(req)
 	if err != nil {
-		atomic.AddInt64(&entry.inFlight, -1)
-		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		entry.inFlight.Add(-1)
+		entry.lastUsed.Store(time.Now().UnixNano())
 		slog.Debug("tls_fingerprint_request_failed", "account_id", accountID, "error", err)
 		return nil, err
 	}
@@ -241,8 +241,8 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	decompressResponseBody(resp)
 
 	resp.Body = wrapTrackedBody(resp.Body, func() {
-		atomic.AddInt64(&entry.inFlight, -1)
-		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
+		entry.inFlight.Add(-1)
+		entry.lastUsed.Store(time.Now().UnixNano())
 	})
 
 	return resp, nil
@@ -273,9 +273,9 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	// 读锁快速路径
 	s.mu.RLock()
 	if entry, ok := s.clients[cacheKey]; ok && s.shouldReuseEntry(entry, isolation, proxyKey, poolKey) {
-		atomic.StoreInt64(&entry.lastUsed, nowUnix)
+		entry.lastUsed.Store(nowUnix)
 		if markInFlight {
-			atomic.AddInt64(&entry.inFlight, 1)
+			entry.inFlight.Add(1)
 		}
 		s.mu.RUnlock()
 		slog.Debug("tls_fingerprint_reusing_client", "account_id", accountID, "cache_key", cacheKey)
@@ -287,9 +287,9 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	s.mu.Lock()
 	if entry, ok := s.clients[cacheKey]; ok {
 		if s.shouldReuseEntry(entry, isolation, proxyKey, poolKey) {
-			atomic.StoreInt64(&entry.lastUsed, nowUnix)
+			entry.lastUsed.Store(nowUnix)
 			if markInFlight {
-				atomic.AddInt64(&entry.inFlight, 1)
+				entry.inFlight.Add(1)
 			}
 			s.mu.Unlock()
 			slog.Debug("tls_fingerprint_reusing_client", "account_id", accountID, "cache_key", cacheKey)
@@ -332,9 +332,9 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 		proxyKey: proxyKey,
 		poolKey:  poolKey,
 	}
-	atomic.StoreInt64(&entry.lastUsed, nowUnix)
+	entry.lastUsed.Store(nowUnix)
 	if markInFlight {
-		atomic.StoreInt64(&entry.inFlight, 1)
+		entry.inFlight.Store(1)
 	}
 	s.clients[cacheKey] = entry
 
@@ -434,9 +434,9 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	// 读锁快速路径：命中缓存直接返回，减少锁竞争
 	s.mu.RLock()
 	if entry, ok := s.clients[cacheKey]; ok && s.shouldReuseEntry(entry, isolation, proxyKey, poolKey) {
-		atomic.StoreInt64(&entry.lastUsed, nowUnix)
+		entry.lastUsed.Store(nowUnix)
 		if markInFlight {
-			atomic.AddInt64(&entry.inFlight, 1)
+			entry.inFlight.Add(1)
 		}
 		s.mu.RUnlock()
 		return entry, nil
@@ -447,9 +447,9 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 	s.mu.Lock()
 	if entry, ok := s.clients[cacheKey]; ok {
 		if s.shouldReuseEntry(entry, isolation, proxyKey, poolKey) {
-			atomic.StoreInt64(&entry.lastUsed, nowUnix)
+			entry.lastUsed.Store(nowUnix)
 			if markInFlight {
-				atomic.AddInt64(&entry.inFlight, 1)
+				entry.inFlight.Add(1)
 			}
 			s.mu.Unlock()
 			return entry, nil
@@ -484,9 +484,9 @@ func (s *httpUpstreamService) getClientEntry(proxyURL string, accountID int64, a
 		poolKey:      poolKey,
 		protocolMode: protocolMode,
 	}
-	atomic.StoreInt64(&entry.lastUsed, nowUnix)
+	entry.lastUsed.Store(nowUnix)
 	if markInFlight {
-		atomic.StoreInt64(&entry.inFlight, 1)
+		entry.inFlight.Store(1)
 	}
 	s.clients[cacheKey] = entry
 
@@ -541,11 +541,11 @@ func (s *httpUpstreamService) evictIdleLocked(now time.Time) {
 	cutoff := now.Add(-ttl).UnixNano()
 	for key, entry := range s.clients {
 		// 跳过有活跃请求的客户端
-		if atomic.LoadInt64(&entry.inFlight) != 0 {
+		if entry.inFlight.Load() != 0 {
 			continue
 		}
 		// 淘汰超时的空闲客户端
-		if atomic.LoadInt64(&entry.lastUsed) <= cutoff {
+		if entry.lastUsed.Load() <= cutoff {
 			s.removeClientLocked(key, entry)
 		}
 	}
@@ -561,10 +561,10 @@ func (s *httpUpstreamService) evictOldestIdleLocked() bool {
 	// 查找最久未使用且无活跃请求的客户端
 	for key, entry := range s.clients {
 		// 跳过有活跃请求的客户端
-		if atomic.LoadInt64(&entry.inFlight) != 0 {
+		if entry.inFlight.Load() != 0 {
 			continue
 		}
-		lastUsed := atomic.LoadInt64(&entry.lastUsed)
+		lastUsed := entry.lastUsed.Load()
 		if oldestEntry == nil || lastUsed < oldestTime {
 			oldestKey = key
 			oldestEntry = entry

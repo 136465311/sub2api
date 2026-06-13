@@ -60,7 +60,7 @@ func (h *UsageHandler) List(c *gin.Context) {
 		}
 
 		// [Security Fix] Verify API Key ownership to prevent horizontal privilege escalation
-		apiKey, err := h.apiKeyService.GetByID(c.Request.Context(), id)
+		apiKey, err := h.apiKeyService.GetUserVisibleByID(c.Request.Context(), subject.UserID, id)
 		if err != nil {
 			response.ErrorFrom(c, err)
 			return
@@ -318,7 +318,7 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 		}
 
 		// [Security Fix] Verify API Key ownership to prevent horizontal privilege escalation
-		apiKey, err := h.apiKeyService.GetByID(c.Request.Context(), id)
+		apiKey, err := h.apiKeyService.GetUserVisibleByID(c.Request.Context(), subject.UserID, id)
 		if err != nil {
 			response.NotFound(c, "API key not found")
 			return
@@ -587,7 +587,7 @@ func (h *UsageHandler) GetMyAPIKeyDailyUsage(c *gin.Context) {
 		return
 	}
 
-	apiKey, err := h.apiKeyService.GetByID(c.Request.Context(), apiKeyID)
+	apiKey, err := h.apiKeyService.GetUserVisibleByID(c.Request.Context(), subject.UserID, apiKeyID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

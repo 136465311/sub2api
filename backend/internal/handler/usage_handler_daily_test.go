@@ -60,6 +60,21 @@ func (s *dailyUsageAPIKeyRepoStub) GetByID(ctx context.Context, id int64) (*serv
 	return &clone, nil
 }
 
+func (s *dailyUsageAPIKeyRepoStub) VerifyOwnership(ctx context.Context, userID int64, apiKeyIDs []int64) ([]int64, error) {
+	validIDs := make([]int64, 0, len(apiKeyIDs))
+	for _, id := range apiKeyIDs {
+		key, ok := s.keys[id]
+		if !ok || key.UserID != userID {
+			continue
+		}
+		if key.Source != "" && key.Source != service.APIKeySourceUser {
+			continue
+		}
+		validIDs = append(validIDs, id)
+	}
+	return validIDs, nil
+}
+
 func newDailyUsageTestRouter(usageRepo *dailyUsageRepoStub, apiKeyRepo *dailyUsageAPIKeyRepoStub, userID int64) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	usageSvc := service.NewUsageService(usageRepo, nil, nil, nil)
@@ -95,7 +110,7 @@ func TestGetMyAPIKeyDailyUsageRejectsCrossUserAccess(t *testing.T) {
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	require.Equal(t, http.StatusForbidden, rec.Code)
+	require.Equal(t, http.StatusNotFound, rec.Code)
 	require.False(t, usageRepo.called)
 }
 

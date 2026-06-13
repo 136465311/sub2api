@@ -1,0 +1,379 @@
+package handler
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
+)
+
+const (
+	userAIConversationIDContextKey = "_user_ai_conversation_id"
+	userAIUserMessageContextKey    = "_user_ai_user_message"
+	userAIModelContextKey          = "_user_ai_model"
+	userAIGroupIDContextKey        = "_user_ai_group_id"
+)
+
+type UserAIHandler struct {
+	userAIService *service.UserAIService
+	gateway       *GatewayHandler
+	openAIGateway *OpenAIGatewayHandler
+}
+
+func NewUserAIHandler(userAIService *service.UserAIService, gateway *GatewayHandler, openAIGateway *OpenAIGatewayHandler) *UserAIHandler {
+	return &UserAIHandler{userAIService: userAIService, gateway: gateway, openAIGateway: openAIGateway}
+}
+
+func (h *UserAIHandler) Models(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+	result, err := h.userAIService.ListModels(c.Request.Context(), subject.UserID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, result)
+}
+
+func (h *UserAIHandler) ListChatConversations(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	page, pageSize := response.ParsePagination(c)
+	params := pagination.PaginationParams{Page: page, PageSize: pageSize}
+	conversations, pageResult, err := h.userAIService.ListChatConversations(c.Request.Context(), subject.UserID, params)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Paginated(c, conversations, pageResult.Total, page, pageSize)
+}
+
+func (h *UserAIHandler) CreateChatConversation(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	var req struct {
+		Title   string `json:"title"`
+		Model   string `json:"model"`
+		GroupID *int64 `json:"group_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if req.GroupID != nil {
+		if _, err := h.userAIService.ResolveGroup(c.Request.Context(), subject.UserID, req.GroupID); err != nil {
+			response.ErrorFrom(c, err)
+			return
+		}
+	}
+	conversation, err := h.userAIService.CreateChatConversation(c.Request.Context(), service.ChatConversationCreateInput{
+		UserID:  subject.UserID,
+		GroupID: req.GroupID,
+		Title:   req.Title,
+		Model:   req.Model,
+	})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Created(c, conversation)
+}
+
+func (h *UserAIHandler) DeleteChatConversation(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "Invalid conversation ID")
+		return
+	}
+	if err := h.userAIService.DeleteChatConversation(c.Request.Context(), subject.UserID, id); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"deleted": true})
+}
+
+func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		c.Abort()
+		return
+	}
+
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		response.BadRequest(c, "Failed to read request body")
+		c.Abort()
+		return
+	}
+	if len(bytes.TrimSpace(body)) == 0 || !gjson.ValidBytes(body) {
+		response.BadRequest(c, "Invalid request body")
+		c.Abort()
+		return
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		response.BadRequest(c, "Invalid request body")
+		c.Abort()
+		return
+	}
+
+	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	if model == "" {
+		response.ErrorFrom(c, service.ErrAIModelRequired)
+		c.Abort()
+		return
+	}
+	groupID := parseOptionalInt64(payload["group_id"])
+	group, err := h.userAIService.ResolveGroup(c.Request.Context(), subject.UserID, groupID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		c.Abort()
+		return
+	}
+	resolvedGroupID := group.ID
+
+	userContent := extractLastUserMessage(body)
+	conversationID := parseOptionalInt64Value(payload["conversation_id"])
+	conversation, err := h.userAIService.EnsureChatConversation(c.Request.Context(), subject.UserID, conversationID, &resolvedGroupID, model, userContent)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		c.Abort()
+		return
+	}
+
+	internalKey, err := h.userAIService.GetOrCreateInternalKey(c.Request.Context(), subject.UserID, &resolvedGroupID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		c.Abort()
+		return
+	}
+
+	delete(payload, "conversation_id")
+	delete(payload, "group_id")
+	cleanBody, err := json.Marshal(payload)
+	if err != nil {
+		response.BadRequest(c, "Invalid request body")
+		c.Abort()
+		return
+	}
+
+	c.Set(userAIConversationIDContextKey, conversation.ID)
+	c.Set(userAIUserMessageContextKey, userContent)
+	c.Set(userAIModelContextKey, model)
+	c.Set(userAIGroupIDContextKey, resolvedGroupID)
+	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
+	c.Request.Header.Del("x-api-key")
+	c.Request.Header.Del("x-goog-api-key")
+	c.Request.Body = io.NopCloser(bytes.NewReader(cleanBody))
+	c.Request.ContentLength = int64(len(cleanBody))
+	c.Next()
+}
+
+func (h *UserAIHandler) ChatCompletions(c *gin.Context) {
+	capture := &captureResponseWriter{ResponseWriter: c.Writer}
+	c.Writer = capture
+
+	if getUserAIGroupPlatform(c) == service.PlatformOpenAI {
+		h.openAIGateway.ChatCompletions(c)
+	} else {
+		h.gateway.ChatCompletions(c)
+	}
+
+	status := capture.Status()
+	if status < http.StatusOK || status >= http.StatusBadRequest {
+		return
+	}
+
+	conversationID, _ := getContextInt64Value(c, userAIConversationIDContextKey)
+	groupID, _ := getContextInt64Value(c, userAIGroupIDContextKey)
+	model, _ := c.Get(userAIModelContextKey)
+	userContent, _ := c.Get(userAIUserMessageContextKey)
+	assistantContent := extractAssistantContent(capture.body.String())
+	if conversationID <= 0 || strings.TrimSpace(userContentString(userContent)) == "" {
+		return
+	}
+	_ = h.userAIService.SaveChatTurn(c.Request.Context(), userIDFromContext(c), conversationID, &groupID, stringFromAny(model), userContentString(userContent), assistantContent)
+}
+
+type captureResponseWriter struct {
+	gin.ResponseWriter
+	body bytes.Buffer
+}
+
+func (w *captureResponseWriter) Write(data []byte) (int, error) {
+	w.body.Write(data)
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *captureResponseWriter) WriteString(data string) (int, error) {
+	w.body.WriteString(data)
+	return w.ResponseWriter.WriteString(data)
+}
+
+func getUserAIGroupPlatform(c *gin.Context) string {
+	apiKey, ok := middleware2.GetAPIKeyFromContext(c)
+	if !ok || apiKey.Group == nil {
+		return ""
+	}
+	return apiKey.Group.Platform
+}
+
+func userIDFromContext(c *gin.Context) int64 {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		return 0
+	}
+	return subject.UserID
+}
+
+func parseOptionalInt64(v any) *int64 {
+	value := parseOptionalInt64Value(v)
+	if value <= 0 {
+		return nil
+	}
+	return &value
+}
+
+func parseOptionalInt64Value(v any) int64 {
+	switch typed := v.(type) {
+	case float64:
+		return int64(typed)
+	case int64:
+		return typed
+	case int:
+		return int64(typed)
+	case string:
+		n, _ := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
+		return n
+	default:
+		return 0
+	}
+}
+
+func getContextInt64Value(c *gin.Context, key string) (int64, bool) {
+	v, ok := c.Get(key)
+	if !ok {
+		return 0, false
+	}
+	return parseOptionalInt64Value(v), true
+}
+
+func stringFromAny(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func userContentString(v any) string {
+	return strings.TrimSpace(stringFromAny(v))
+}
+
+func extractLastUserMessage(body []byte) string {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	values := messages.Array()
+	for i := len(values) - 1; i >= 0; i-- {
+		if values[i].Get("role").String() == "user" {
+			return extractMessageContent(values[i].Get("content"))
+		}
+	}
+	return ""
+}
+
+func extractMessageContent(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String())
+	}
+	if content.IsArray() {
+		var parts []string
+		for _, item := range content.Array() {
+			switch item.Get("type").String() {
+			case "text", "input_text":
+				if text := strings.TrimSpace(item.Get("text").String()); text != "" {
+					parts = append(parts, text)
+				}
+			}
+		}
+		return strings.Join(parts, "\n")
+	}
+	return strings.TrimSpace(content.Raw)
+}
+
+func extractAssistantContent(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "data:") || strings.Contains(raw, "\ndata:") {
+		return extractAssistantContentFromSSE(raw)
+	}
+	if !gjson.Valid(raw) {
+		return ""
+	}
+	if content := gjson.Get(raw, "choices.0.message.content").String(); content != "" {
+		return content
+	}
+	if content := gjson.Get(raw, "content.0.text").String(); content != "" {
+		return content
+	}
+	return ""
+}
+
+func extractAssistantContentFromSSE(raw string) string {
+	var builder strings.Builder
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" || data == "[DONE]" || !gjson.Valid(data) {
+			continue
+		}
+		if content := gjson.Get(data, "choices.0.delta.content").String(); content != "" {
+			builder.WriteString(content)
+			continue
+		}
+		if content := gjson.Get(data, "choices.0.message.content").String(); content != "" {
+			builder.WriteString(content)
+			continue
+		}
+		if content := gjson.Get(data, "delta.text").String(); content != "" {
+			builder.WriteString(content)
+			continue
+		}
+	}
+	return builder.String()
+}
