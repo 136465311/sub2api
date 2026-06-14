@@ -180,20 +180,60 @@
                   <span>{{ message.role === 'user' ? t('aiChat.you') : t('aiChat.assistant') }}</span>
                   <span v-if="message.model">{{ message.model }}</span>
                 </div>
-                <div
-                  v-if="message.role === 'assistant'"
-                  class="markdown-body"
-                  v-html="renderMarkdown(message.content || (sending ? t('aiChat.streaming') : ''))"
-                ></div>
+                <template v-if="message.role === 'assistant'">
+                  <div v-if="messageImageUrls(message).length" class="assistant-image-list">
+                    <figure
+                      v-for="(imageUrl, index) in messageImageUrls(message)"
+                      :key="`${message.id}-assistant-image-${index}`"
+                      class="assistant-image-card"
+                    >
+                      <button
+                        type="button"
+                        class="assistant-image-preview"
+                        :title="t('common.expand')"
+                        :aria-label="t('common.expand')"
+                        @click="openImagePreview(imageUrl, t('aiChat.generatedImageAlt', { count: index + 1 }))"
+                      >
+                        <img
+                          :src="imageUrl"
+                          :alt="t('aiChat.generatedImageAlt', { count: index + 1 })"
+                          loading="lazy"
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        class="message-download-button"
+                        @click="downloadImage(imageUrl, `ai-chat-${Math.abs(message.id)}-${index + 1}`)"
+                      >
+                        <Icon name="download" size="sm" />
+                        <span>{{ t('aiChat.download') }}</span>
+                      </button>
+                    </figure>
+                  </div>
+                  <div
+                    v-if="messageText(message) || (!messageImageUrls(message).length && sending)"
+                    class="markdown-body"
+                    v-html="renderMarkdown(messageText(message) || t('aiChat.streaming'))"
+                  ></div>
+                </template>
                 <template v-else>
                   <div v-if="messageImageUrls(message).length" class="message-image-grid">
-                    <img
+                    <button
                       v-for="(imageUrl, index) in messageImageUrls(message)"
                       :key="`${message.id}-image-${index}`"
-                      :src="imageUrl"
-                      :alt="t('aiChat.imageAlt', { count: index + 1 })"
-                      class="message-image-thumb"
-                    />
+                      type="button"
+                      class="message-image-button"
+                      :title="t('common.expand')"
+                      :aria-label="t('common.expand')"
+                      @click="openImagePreview(imageUrl, t('aiChat.imageAlt', { count: index + 1 }))"
+                    >
+                      <img
+                        :src="imageUrl"
+                        :alt="t('aiChat.imageAlt', { count: index + 1 })"
+                        class="message-image-thumb"
+                        loading="lazy"
+                      />
+                    </button>
                   </div>
                   <p v-if="messageText(message)" class="whitespace-pre-wrap break-words">{{ messageText(message) }}</p>
                 </template>
@@ -234,7 +274,7 @@
                 type="file"
                 accept="image/jpeg,image/png,image/webp,image/gif"
                 multiple
-                :disabled="sending || imageUploading || selectedImages.length >= maxSelectedImages"
+                :disabled="isSelectedImageModel || sending || imageUploading || selectedImages.length >= maxSelectedImages"
                 @change="handleImageSelection"
               />
               <button
@@ -242,7 +282,7 @@
                 class="image-upload-button"
                 :title="t('aiChat.uploadImage')"
                 :aria-label="t('aiChat.uploadImage')"
-                :disabled="sending || imageUploading || selectedImages.length >= maxSelectedImages"
+                :disabled="isSelectedImageModel || sending || imageUploading || selectedImages.length >= maxSelectedImages"
                 @click="openImagePicker"
               >
                 <Icon v-if="imageUploading" name="refresh" size="sm" class="animate-spin" />
@@ -380,6 +420,43 @@
       </Transition>
     </Teleport>
 
+    <Teleport to="body">
+      <Transition name="mobile-drawer-fade">
+        <div
+          v-if="previewImageUrl"
+          class="image-preview-overlay"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="previewImageAlt || t('aiChat.generatedImageAlt', { count: 1 })"
+          @click.self="closeImagePreview"
+        >
+          <div class="image-preview-dialog">
+            <div class="image-preview-toolbar">
+              <button
+                type="button"
+                class="image-preview-toolbar-button"
+                :title="t('aiChat.download')"
+                :aria-label="t('aiChat.download')"
+                @click="downloadImage(previewImageUrl, `ai-chat-preview-${Date.now()}`)"
+              >
+                <Icon name="download" size="sm" />
+              </button>
+              <button
+                type="button"
+                class="image-preview-toolbar-button"
+                :title="t('common.close')"
+                :aria-label="t('common.close')"
+                @click="closeImagePreview"
+              >
+                <Icon name="x" size="sm" />
+              </button>
+            </div>
+            <img :src="previewImageUrl" :alt="previewImageAlt" class="image-preview-full" />
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
     <ConfirmDialog
       :show="pendingDeleteId !== null"
       :title="t('aiChat.deleteConversation')"
@@ -434,6 +511,8 @@ const messagesContainerRef = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLTextAreaElement | null>(null)
 const imageInputRef = ref<HTMLInputElement | null>(null)
 const mobileConversationsOpen = ref(false)
+const previewImageUrl = ref('')
+const previewImageAlt = ref('')
 let tempMessageId = -1
 let selectedImageId = 1
 
@@ -494,8 +573,18 @@ const activeConversation = computed(() => {
 const activeMessages = computed(() => activeConversation.value?.messages || [])
 
 const canCreateConversation = computed(() => Boolean(selectedModel.value && selectedGroupId.value))
+const isSelectedImageModel = computed(() => isImageModel(selectedModel.value))
 
 const canSend = computed(() => {
+  if (isSelectedImageModel.value) {
+    return Boolean(
+      draft.value.trim() &&
+      selectedModel.value &&
+      selectedGroupId.value &&
+      !imageUploading.value &&
+      !sending.value
+    )
+  }
   return Boolean(
     (draft.value.trim() || selectedImages.value.length > 0) &&
     selectedModel.value &&
@@ -513,13 +602,13 @@ watch(selectedGroupId, () => {
 })
 
 watch(activeConversationId, () => {
-  const conversation = activeConversation.value
-  if (!conversation) return
-  if (conversation.group_id && modelsResult.value.groups.some((group) => group.id === conversation.group_id)) {
-    selectedGroupId.value = conversation.group_id
-  }
-  if (conversation.model) {
-    selectedModel.value = conversation.model
+  syncActiveConversationSelection()
+})
+
+watch(selectedModel, () => {
+  if (isSelectedImageModel.value && selectedImages.value.length > 0) {
+    selectedImages.value = []
+    resetImageInput()
   }
 })
 
@@ -534,7 +623,7 @@ onBeforeUnmount(() => {
 async function loadModels(): Promise<void> {
   loadingModels.value = true
   try {
-    const result = await userAiAPI.getModels()
+    const result = await userAiAPI.getChatModelsWithImages()
     modelsResult.value = {
       groups: result.groups || [],
       default_group_id: result.default_group_id,
@@ -542,10 +631,12 @@ async function loadModels(): Promise<void> {
     }
 
     const defaultGroup = result.default_group_id ?? result.groups?.[0]?.id ?? null
-    selectedGroupId.value = selectedGroupId.value ?? defaultGroup
-
-    const models = selectedGroup.value?.models || []
-    selectedModel.value = result.default_model || selectedModel.value || models[0] || ''
+    if (!activeConversation.value) {
+      selectedGroupId.value = selectedGroupId.value ?? defaultGroup
+      const models = selectedGroup.value?.models || []
+      selectedModel.value = result.default_model || selectedModel.value || models[0] || ''
+    }
+    syncActiveConversationSelection()
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('aiChat.loadFailed')))
   } finally {
@@ -563,6 +654,7 @@ async function loadConversations(preferredId?: number | null): Promise<void> {
         ? preferredId
         : conversations.value[0]?.id ?? null
     activeConversationId.value = nextActiveId
+    syncActiveConversationSelection()
     await scrollToBottom()
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('aiChat.loadFailed')))
@@ -628,6 +720,10 @@ async function sendMessage(): Promise<void> {
   const text = draft.value.trim()
   const images = selectedImages.value.map((image) => ({ ...image }))
   if ((!text && images.length === 0) || !selectedModel.value || !selectedGroupId.value || sending.value) return
+  if (isImageModel(selectedModel.value) && images.length > 0) {
+    appStore.showError(t('aiChat.imagePromptOnly'))
+    return
+  }
 
   const titleSeed = text || t('aiChat.imageConversationTitle')
   const conversation = activeConversation.value || (await createConversation(titleSeed))
@@ -651,30 +747,50 @@ async function sendMessage(): Promise<void> {
   await scrollToBottom()
 
   try {
-    const requestMessages = buildRequestMessages(conversation.id, userMessage)
-    const streamedContent = await userAiAPI.streamChatCompletions(
-      {
-        model: selectedModel.value,
-        group_id: selectedGroupId.value,
-        conversation_id: conversation.id,
-        messages: requestMessages,
-        stream: true
-      },
-      {
-        signal: abortController.value.signal,
-        onDelta: async (delta) => {
-          appendAssistantDelta(conversation.id, assistantMessage.id, delta)
-          await scrollToBottom()
+    if (isImageModel(selectedModel.value)) {
+      const result = await userAiAPI.generateImages(
+        {
+          prompt: text,
+          model: selectedModel.value,
+          group_id: selectedGroupId.value,
+          conversation_id: conversation.id
+        },
+        {
+          signal: abortController.value.signal
         }
+      )
+      const assistantImageContent = buildAssistantImageContent(result.data)
+      if (assistantImageContent.length === 0) {
+        throw new Error(t('aiImage.generateFailed'))
       }
-    )
-    if (!getLocalMessageContent(conversation.id, assistantMessage.id) && streamedContent) {
-      updateLocalMessageContent(conversation.id, assistantMessage.id, streamedContent)
+      updateLocalMessageContent(conversation.id, assistantMessage.id, serializeChatContent(assistantImageContent))
       await scrollToBottom()
+    } else {
+      const requestMessages = buildRequestMessages(conversation.id, userMessage)
+      const streamedContent = await userAiAPI.streamChatCompletions(
+        {
+          model: selectedModel.value,
+          group_id: selectedGroupId.value,
+          conversation_id: conversation.id,
+          messages: requestMessages,
+          stream: true
+        },
+        {
+          signal: abortController.value.signal,
+          onDelta: async (delta) => {
+            appendAssistantDelta(conversation.id, assistantMessage.id, delta)
+            await scrollToBottom()
+          }
+        }
+      )
+      if (!getLocalMessageContent(conversation.id, assistantMessage.id) && streamedContent) {
+        updateLocalMessageContent(conversation.id, assistantMessage.id, streamedContent)
+        await scrollToBottom()
+      }
     }
     await loadConversations(conversation.id)
   } catch (err) {
-    if ((err as Error)?.name !== 'AbortError') {
+    if (!isRequestCanceled(err)) {
       await loadConversations(conversation.id)
       if (!hasSavedAssistantReply(conversation.id, userContent)) {
         removeLocalMessage(conversation.id, assistantMessage.id)
@@ -687,6 +803,11 @@ async function sendMessage(): Promise<void> {
     await nextTick()
     inputRef.value?.focus()
   }
+}
+
+function isRequestCanceled(err: unknown): boolean {
+  const record = err as { name?: string; code?: string }
+  return record?.name === 'AbortError' || record?.name === 'CanceledError' || record?.code === 'ERR_CANCELED'
 }
 
 function stopStreaming(): void {
@@ -761,17 +882,66 @@ function buildRequestMessages(conversationId: number, userMessage: AIChatMessage
     .filter((message) => message.id > 0 || message.id === userMessage.id)
     .filter((message) => {
       if (!['system', 'user', 'assistant'].includes(message.role)) return false
-      return parseMessageContent(message.content).hasContent
+      return messageRequestContent(message) !== null
     })
     .map((message) => ({
       role: message.role as 'system' | 'user' | 'assistant',
-      content: parseMessageContent(message.content).requestContent
+      content: messageRequestContent(message) as ChatMessageContent
     }))
   return persistedMessages
 }
 
+function messageRequestContent(message: AIChatMessage): ChatMessageContent | null {
+  const parsed = parseMessageContent(message.content)
+  if (!parsed.hasContent) return null
+  if (message.role === 'assistant' && parsed.imageUrls.length > 0) {
+    return null
+  }
+  return parsed.requestContent
+}
+
+function buildAssistantImageContent(images: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>): Exclude<ChatMessageContent, string> {
+  const content: Exclude<ChatMessageContent, string> = []
+  for (const image of images) {
+    const imageUrl = String(image.url || (image.b64_json ? `data:image/png;base64,${image.b64_json}` : '')).trim()
+    if (!imageUrl) continue
+    content.push({
+      type: 'image_url',
+      image_url: {
+        url: imageUrl
+      }
+    })
+    const revisedPrompt = String(image.revised_prompt || '').trim()
+    if (revisedPrompt) {
+      content.push({ type: 'text', text: revisedPrompt })
+    }
+  }
+  return content
+}
+
+function syncActiveConversationSelection(): void {
+  const conversation = activeConversation.value
+  if (!conversation) return
+  if (conversation.group_id && modelsResult.value.groups.some((group) => group.id === conversation.group_id)) {
+    selectedGroupId.value = conversation.group_id
+  }
+  if (conversation.model) {
+    selectedModel.value = conversation.model
+  }
+}
+
+function openImagePreview(url: string, alt: string): void {
+  previewImageUrl.value = url
+  previewImageAlt.value = alt
+}
+
+function closeImagePreview(): void {
+  previewImageUrl.value = ''
+  previewImageAlt.value = ''
+}
+
 function openImagePicker(): void {
-  if (sending.value || imageUploading.value || selectedImages.value.length >= maxSelectedImages) return
+  if (isSelectedImageModel.value || sending.value || imageUploading.value || selectedImages.value.length >= maxSelectedImages) return
   imageInputRef.value?.click()
 }
 
@@ -1038,10 +1208,57 @@ function extractImageUrl(record: Record<string, any>): string {
 
 function isAllowedUploadedImageUrl(url: string): boolean {
   const trimmed = url.trim()
-  if (/^data:image\/(?:jpeg|jpg|png|webp|gif);base64,/i.test(trimmed)) {
-    return false
+  return isAllowedImageDisplayUrl(trimmed)
+}
+
+function isAllowedImageDisplayUrl(url: string): boolean {
+  const trimmed = url.trim()
+  return (
+    /^\/uploads\/user_ai\/\d+\/(?:generated\/)?[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp|gif)$/i.test(trimmed) ||
+    /^https?:\/\//i.test(trimmed)
+  )
+}
+
+function isImageModel(model: string): boolean {
+  const normalized = model.trim().toLowerCase()
+  return normalized === 'gpt-image' || normalized.startsWith('gpt-image-') || normalized.startsWith('grok-image')
+}
+
+async function downloadImage(url: string, name: string): Promise<void> {
+  const filename = `${name}.${fileExtensionFromImageURL(url)}`
+  try {
+    const response = await fetch(url, {
+      credentials: url.startsWith('/') ? 'include' : 'omit'
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const blob = await response.blob()
+    const blobURL = URL.createObjectURL(blob)
+    triggerDownload(blobURL, filename)
+    window.setTimeout(() => URL.revokeObjectURL(blobURL), 1000)
+  } catch {
+    triggerDownload(url, filename, true)
   }
-  return /^\/uploads\/user_ai\/\d+\/[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp|gif)$/i.test(trimmed) || /^https?:\/\//i.test(trimmed)
+}
+
+function triggerDownload(url: string, filename: string, newWindow = false): void {
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  if (newWindow) {
+    link.target = '_blank'
+    link.rel = 'noopener noreferrer'
+  }
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+}
+
+function fileExtensionFromImageURL(url: string): string {
+  const lower = url.toLowerCase()
+  if (lower.includes('.jpeg') || lower.includes('.jpg')) return 'jpg'
+  if (lower.includes('.webp')) return 'webp'
+  if (lower.includes('.gif')) return 'gif'
+  return 'png'
 }
 
 function conversationTitle(conversation: AIConversation): string {
@@ -1358,13 +1575,157 @@ async function scrollToBottom(): Promise<void> {
   height: 7rem;
   width: 7rem;
   border-radius: 0.75rem;
-  border: 1px solid rgb(191 219 254);
   object-fit: cover;
   background: rgb(255 255 255 / 0.16);
 }
 
+.message-image-button {
+  display: inline-flex;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  border: 1px solid rgb(191 219 254);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.message-image-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 25px rgb(15 23 42 / 0.18);
+}
+
 .message-row-user .message-image-thumb {
   border-color: rgb(147 197 253);
+}
+
+.message-row-user .message-image-button {
+  border-color: rgb(147 197 253);
+}
+
+.assistant-image-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.assistant-image-card {
+  display: flex;
+  width: min(18rem, 100%);
+  flex-direction: column;
+  gap: 0.625rem;
+}
+
+.assistant-image-preview {
+  display: block;
+  overflow: hidden;
+  border-radius: 0.875rem;
+  border: 1px solid rgb(209 213 219);
+  background: rgb(255 255 255);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.assistant-image-preview:hover {
+  transform: translateY(-1px);
+  border-color: rgb(37 99 235);
+  box-shadow: 0 12px 28px rgb(15 23 42 / 0.16);
+}
+
+.assistant-image-preview img {
+  display: block;
+  width: 100%;
+  object-fit: cover;
+}
+
+.message-download-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  align-self: flex-start;
+  border-radius: 999px;
+  border: 1px solid rgb(209 213 219);
+  background: rgb(255 255 255 / 0.92);
+  padding: 0.425rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgb(55 65 81);
+  transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+}
+
+.message-download-button:hover {
+  border-color: rgb(37 99 235);
+  color: rgb(37 99 235);
+}
+
+.dark .assistant-image-preview {
+  border-color: rgb(51 65 85);
+  background: rgb(15 23 42);
+}
+
+.dark .assistant-image-preview:hover {
+  border-color: rgb(96 165 250);
+  box-shadow: 0 12px 28px rgb(2 6 23 / 0.45);
+}
+
+.dark .message-download-button {
+  border-color: rgb(51 65 85);
+  background: rgb(15 23 42 / 0.88);
+  color: rgb(226 232 240);
+}
+
+.dark .message-download-button:hover {
+  border-color: rgb(96 165 250);
+  color: rgb(147 197 253);
+}
+
+.image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(2 6 23 / 0.8);
+  padding: 1.5rem;
+  backdrop-filter: blur(6px);
+}
+
+.image-preview-dialog {
+  display: flex;
+  max-height: 100%;
+  max-width: min(72rem, 100%);
+  flex-direction: column;
+  gap: 0.875rem;
+}
+
+.image-preview-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.image-preview-toolbar-button {
+  display: inline-flex;
+  height: 2.5rem;
+  width: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgb(148 163 184 / 0.45);
+  background: rgb(15 23 42 / 0.88);
+  color: white;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.image-preview-toolbar-button:hover {
+  border-color: rgb(147 197 253);
+  background: rgb(30 41 59 / 0.92);
+}
+
+.image-preview-full {
+  max-height: calc(100vh - 7rem);
+  max-width: min(72rem, 100%);
+  border-radius: 1rem;
+  object-fit: contain;
+  box-shadow: 0 28px 60px rgb(2 6 23 / 0.45);
 }
 
 .empty-chat {

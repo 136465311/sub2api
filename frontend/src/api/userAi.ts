@@ -18,9 +18,10 @@ export interface AIModelsResult {
 export interface GenerateImagePayload {
   prompt: string
   model: string
-  size: '1:1' | '16:9' | '9:16'
-  n: number
+  size?: '1:1' | '16:9' | '9:16'
+  n?: number
   group_id?: number | null
+  conversation_id?: number | null
 }
 
 export interface AIImageGenerationImage {
@@ -106,6 +107,10 @@ export interface StreamChatCompletionPayload {
 export interface StreamChatCompletionOptions {
   signal?: AbortSignal
   onDelta?: (delta: string) => void
+}
+
+export interface GenerateImageOptions {
+  signal?: AbortSignal
 }
 
 export interface UploadImageResult {
@@ -195,6 +200,34 @@ function normalizeImageGenerationResponse(raw: RawRecord): AIImageGenerationResp
     data,
     ...(typeof raw?.size === 'string' && raw.size ? { size: raw.size } : {}),
     ...(typeof raw?.model === 'string' && raw.model ? { model: raw.model } : {})
+  }
+}
+
+function mergeModelLists(primary: AIModelsResult, secondary: AIModelsResult): AIModelsResult {
+  const groupsById = new Map<number, AIModelGroup>()
+  for (const source of [primary, secondary]) {
+    for (const group of source.groups || []) {
+      const existing = groupsById.get(group.id)
+      if (!existing) {
+        groupsById.set(group.id, {
+          ...group,
+          models: [...(group.models || [])]
+        })
+        continue
+      }
+      const seen = new Set(existing.models.map((model) => model.toLowerCase()))
+      for (const model of group.models || []) {
+        const key = model.toLowerCase()
+        if (seen.has(key)) continue
+        seen.add(key)
+        existing.models.push(model)
+      }
+    }
+  }
+  return {
+    groups: Array.from(groupsById.values()),
+    default_group_id: primary.default_group_id ?? secondary.default_group_id ?? null,
+    default_model: primary.default_model || secondary.default_model || ''
   }
 }
 
@@ -291,6 +324,16 @@ export const userAiAPI = {
     return apiClient.get('/user/images/models').then((res) => res.data)
   },
 
+  async getChatModelsWithImages(): Promise<AIModelsResult> {
+    const chatModels = await this.getModels()
+    try {
+      const imageModels = await this.getImageModels()
+      return mergeModelLists(chatModels, imageModels)
+    } catch {
+      return chatModels
+    }
+  },
+
   async listConversations(page = 1, pageSize = 50): Promise<PaginatedResponse<AIConversation>> {
     const res = await apiClient.get('/user/chat/conversations', {
       params: { page, page_size: pageSize }
@@ -323,9 +366,13 @@ export const userAiAPI = {
     return res.data as UploadImageResult
   },
 
-  async generateImages(payload: GenerateImagePayload): Promise<AIImageGenerationResponse> {
+  async generateImages(
+    payload: GenerateImagePayload,
+    options: GenerateImageOptions = {}
+  ): Promise<AIImageGenerationResponse> {
     const res = await apiClient.post('/user/images/generations', payload, {
-      timeout: 180000
+      timeout: 180000,
+      signal: options.signal
     })
     return normalizeImageGenerationResponse((res.data ?? {}) as RawRecord)
   },

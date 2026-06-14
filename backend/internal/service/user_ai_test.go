@@ -79,3 +79,19 @@ func TestChatMessageContentSummaryUsesImageFallback(t *testing.T) {
 		t.Fatalf("expected empty title and image flag, got title=%q hasImage=%v", title, hasImage)
 	}
 }
+
+func TestIsOpenAIImageModelName(t *testing.T) {
+	tests := map[string]bool{
+		"gpt-image":     true,
+		"gpt-image-2":   true,
+		"grok-image":    true,
+		"grok-image-v2": true,
+		"gpt-4o":        false,
+	}
+
+	for model, want := range tests {
+		if got := isOpenAIImageModelName(model); got != want {
+			t.Fatalf("isOpenAIImageModelName(%q) = %v, want %v", model, got, want)
+		}
+	}
+}

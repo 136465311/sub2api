@@ -220,7 +220,7 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/user/ai-image',
     name: 'UserAIImage',
-    component: () => import('@/views/user/AIImageView.vue'),
+    redirect: '/user/ai-chat',
     meta: {
       requiresAuth: true,
       requiresAdmin: false,

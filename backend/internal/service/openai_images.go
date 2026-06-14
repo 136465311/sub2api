@@ -455,7 +455,8 @@ func applyOpenAIImagesDefaults(req *OpenAIImagesRequest) {
 }
 
 func isOpenAIImageGenerationModel(model string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gpt-image-")
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	return normalized == "gpt-image" || strings.HasPrefix(normalized, "gpt-image-") || strings.HasPrefix(normalized, "grok-image")
 }
 
 func validateOpenAIImagesModel(model string) error {
