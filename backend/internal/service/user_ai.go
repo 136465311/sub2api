@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -171,13 +172,18 @@ func (s *UserAIService) SaveChatTurn(ctx context.Context, userID int64, conversa
 	if conversationID <= 0 {
 		return fmt.Errorf("conversation id is required")
 	}
-	title := normalizeConversationTitle(userContent)
+	userContent = strings.TrimSpace(userContent)
+	titleSeed, hasImage := chatMessageContentSummary(userContent)
+	if titleSeed == "" && hasImage {
+		titleSeed = "图片消息"
+	}
+	title := normalizeConversationTitle(titleSeed)
 	if strings.TrimSpace(userContent) != "" {
 		if _, err := s.repo.CreateChatMessage(ctx, ChatMessageCreateInput{
 			ConversationID: conversationID,
 			UserID:         userID,
 			Role:           "user",
-			Content:        strings.TrimSpace(userContent),
+			Content:        userContent,
 			Model:          strings.TrimSpace(model),
 		}); err != nil {
 			return err
@@ -195,6 +201,59 @@ func (s *UserAIService) SaveChatTurn(ctx context.Context, userID int64, conversa
 		}
 	}
 	return s.repo.UpdateChatConversationAfterMessage(ctx, userID, conversationID, title, strings.TrimSpace(model), groupID)
+}
+
+func chatMessageContentSummary(content string) (string, bool) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return "", false
+	}
+	if !strings.HasPrefix(content, "[") {
+		return content, false
+	}
+
+	var parts []any
+	if err := json.Unmarshal([]byte(content), &parts); err != nil {
+		return content, false
+	}
+
+	var textParts []string
+	hasImage := false
+	for _, part := range parts {
+		switch typed := part.(type) {
+		case string:
+			if text := strings.TrimSpace(typed); text != "" {
+				textParts = append(textParts, text)
+			}
+		case map[string]any:
+			partType := strings.TrimSpace(stringFromMapValue(typed["type"]))
+			if (partType == "text" || partType == "input_text" || typed["text"] != nil) && strings.TrimSpace(stringFromMapValue(typed["text"])) != "" {
+				textParts = append(textParts, strings.TrimSpace(stringFromMapValue(typed["text"])))
+			}
+			if partType == "image_url" || mapValueHasImageURL(typed) {
+				hasImage = true
+			}
+		}
+	}
+	return strings.Join(textParts, "\n"), hasImage
+}
+
+func stringFromMapValue(value any) string {
+	if s, ok := value.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func mapValueHasImageURL(value map[string]any) bool {
+	if strings.TrimSpace(stringFromMapValue(value["url"])) != "" || strings.TrimSpace(stringFromMapValue(value["image_url"])) != "" {
+		return true
+	}
+	imageURL, ok := value["image_url"].(map[string]any)
+	if !ok {
+		return false
+	}
+	return strings.TrimSpace(stringFromMapValue(imageURL["url"])) != ""
 }
 
 func normalizeConversationTitle(title string) string {

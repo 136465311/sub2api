@@ -43,9 +43,23 @@ export interface CreateConversationPayload {
   group_id?: number | null
 }
 
+export interface ChatImageContentPart {
+  type: 'image_url'
+  image_url: {
+    url: string
+  }
+}
+
+export interface ChatTextContentPart {
+  type: 'text'
+  text: string
+}
+
+export type ChatMessageContent = string | Array<ChatTextContentPart | ChatImageContentPart>
+
 export interface ChatCompletionMessage {
   role: 'system' | 'user' | 'assistant'
-  content: string
+  content: ChatMessageContent
 }
 
 export interface StreamChatCompletionPayload {

@@ -20,6 +20,7 @@ import (
 const (
 	userAIConversationIDContextKey = "_user_ai_conversation_id"
 	userAIUserMessageContextKey    = "_user_ai_user_message"
+	userAIUserContentContextKey    = "_user_ai_user_content"
 	userAIModelContextKey          = "_user_ai_model"
 	userAIGroupIDContextKey        = "_user_ai_group_id"
 )
@@ -161,6 +162,7 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 	resolvedGroupID := group.ID
 
 	userContent := extractLastUserMessage(body)
+	userContentForStorage := extractLastUserMessageRawContent(body)
 	conversationID := parseOptionalInt64Value(payload["conversation_id"])
 	conversation, err := h.userAIService.EnsureChatConversation(c.Request.Context(), subject.UserID, conversationID, &resolvedGroupID, model, userContent)
 	if err != nil {
@@ -187,6 +189,7 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 
 	c.Set(userAIConversationIDContextKey, conversation.ID)
 	c.Set(userAIUserMessageContextKey, userContent)
+	c.Set(userAIUserContentContextKey, userContentForStorage)
 	c.Set(userAIModelContextKey, model)
 	c.Set(userAIGroupIDContextKey, resolvedGroupID)
 	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
@@ -216,11 +219,12 @@ func (h *UserAIHandler) ChatCompletions(c *gin.Context) {
 	groupID, _ := getContextInt64Value(c, userAIGroupIDContextKey)
 	model, _ := c.Get(userAIModelContextKey)
 	userContent, _ := c.Get(userAIUserMessageContextKey)
+	userContentForStorage, _ := c.Get(userAIUserContentContextKey)
 	assistantContent := extractAssistantContent(capture.body.String())
-	if conversationID <= 0 || strings.TrimSpace(userContentString(userContent)) == "" {
+	if conversationID <= 0 || (strings.TrimSpace(userContentString(userContent)) == "" && strings.TrimSpace(userContentString(userContentForStorage)) == "") {
 		return
 	}
-	_ = h.userAIService.SaveChatTurn(c.Request.Context(), userIDFromContext(c), conversationID, &groupID, stringFromAny(model), userContentString(userContent), assistantContent)
+	_ = h.userAIService.SaveChatTurn(c.Request.Context(), userIDFromContext(c), conversationID, &groupID, stringFromAny(model), userContentString(userContentForStorage), assistantContent)
 }
 
 type captureResponseWriter struct {
@@ -307,6 +311,25 @@ func extractLastUserMessage(body []byte) string {
 		if values[i].Get("role").String() == "user" {
 			return extractMessageContent(values[i].Get("content"))
 		}
+	}
+	return ""
+}
+
+func extractLastUserMessageRawContent(body []byte) string {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	values := messages.Array()
+	for i := len(values) - 1; i >= 0; i-- {
+		if values[i].Get("role").String() != "user" {
+			continue
+		}
+		content := values[i].Get("content")
+		if content.Type == gjson.String {
+			return strings.TrimSpace(content.String())
+		}
+		return strings.TrimSpace(content.Raw)
 	}
 	return ""
 }

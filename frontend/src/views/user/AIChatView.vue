@@ -185,22 +185,75 @@
                   class="markdown-body"
                   v-html="renderMarkdown(message.content || (sending ? t('aiChat.streaming') : ''))"
                 ></div>
-                <p v-else class="whitespace-pre-wrap break-words">{{ message.content }}</p>
+                <template v-else>
+                  <div v-if="messageImageUrls(message).length" class="message-image-grid">
+                    <img
+                      v-for="(imageUrl, index) in messageImageUrls(message)"
+                      :key="`${message.id}-image-${index}`"
+                      :src="imageUrl"
+                      :alt="t('aiChat.imageAlt', { count: index + 1 })"
+                      class="message-image-thumb"
+                    />
+                  </div>
+                  <p v-if="messageText(message)" class="whitespace-pre-wrap break-words">{{ messageText(message) }}</p>
+                </template>
               </div>
             </article>
           </div>
         </main>
 
         <footer class="composer">
-          <textarea
-            ref="inputRef"
-            v-model="draft"
-            class="input composer-input"
-            rows="3"
-            :placeholder="t('aiChat.inputPlaceholder')"
-            :disabled="sending || !selectedModel"
-            @keydown.enter.exact.prevent="sendMessage"
-          ></textarea>
+          <div class="composer-editor">
+            <div v-if="selectedImages.length" class="selected-image-strip">
+              <div
+                v-for="image in selectedImages"
+                :key="image.id"
+                class="selected-image-item"
+              >
+                <img :src="image.dataUrl" :alt="image.name" class="selected-image-thumb" />
+                <button
+                  type="button"
+                  class="selected-image-remove"
+                  :title="t('aiChat.removeImage')"
+                  :aria-label="t('aiChat.removeImage')"
+                  :disabled="sending"
+                  @click="removeSelectedImage(image.id)"
+                >
+                  <Icon name="x" size="xs" />
+                </button>
+              </div>
+            </div>
+            <div class="composer-input-row">
+              <input
+                ref="imageInputRef"
+                class="sr-only"
+                type="file"
+                accept="image/jpeg,image/png,image/webp,image/gif"
+                multiple
+                :disabled="sending || selectedImages.length >= maxSelectedImages"
+                @change="handleImageSelection"
+              />
+              <button
+                type="button"
+                class="image-upload-button"
+                :title="t('aiChat.uploadImage')"
+                :aria-label="t('aiChat.uploadImage')"
+                :disabled="sending || selectedImages.length >= maxSelectedImages"
+                @click="openImagePicker"
+              >
+                <Icon name="upload" size="sm" />
+              </button>
+              <textarea
+                ref="inputRef"
+                v-model="draft"
+                class="input composer-input"
+                rows="3"
+                :placeholder="t('aiChat.inputPlaceholder')"
+                :disabled="sending || !selectedModel"
+                @keydown.enter.exact.prevent="sendMessage"
+              ></textarea>
+            </div>
+          </div>
           <div class="composer-actions">
             <p class="truncate text-xs text-gray-500 dark:text-dark-400">
               {{ selectedGroup?.name || t('aiChat.selectGroup') }}
@@ -345,7 +398,14 @@ import Select from '@/components/common/Select.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import Icon from '@/components/icons/Icon.vue'
 import { useAppStore } from '@/stores/app'
-import { userAiAPI, type AIConversation, type AIChatMessage, type AIModelGroup } from '@/api/userAi'
+import {
+  userAiAPI,
+  type AIConversation,
+  type AIChatMessage,
+  type AIModelGroup,
+  type ChatCompletionMessage,
+  type ChatMessageContent
+} from '@/api/userAi'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { formatRelativeTime } from '@/utils/format'
 
@@ -358,6 +418,7 @@ const activeConversationId = ref<number | null>(null)
 const selectedGroupId = ref<number | null>(null)
 const selectedModel = ref<string>('')
 const draft = ref('')
+const selectedImages = ref<SelectedImage[]>([])
 const loadingModels = ref(false)
 const loadingConversations = ref(false)
 const sending = ref(false)
@@ -365,8 +426,29 @@ const pendingDeleteId = ref<number | null>(null)
 const abortController = ref<AbortController | null>(null)
 const messagesContainerRef = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLTextAreaElement | null>(null)
+const imageInputRef = ref<HTMLInputElement | null>(null)
 const mobileConversationsOpen = ref(false)
 let tempMessageId = -1
+let selectedImageId = 1
+
+const maxSelectedImages = 3
+const maxImageBytes = 5 * 1024 * 1024
+const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+
+interface SelectedImage {
+  id: number
+  name: string
+  type: string
+  size: number
+  dataUrl: string
+}
+
+interface ParsedMessageContent {
+  text: string
+  imageUrls: string[]
+  requestContent: ChatMessageContent
+  hasContent: boolean
+}
 
 marked.use({ gfm: true, breaks: true })
 
@@ -405,7 +487,12 @@ const activeMessages = computed(() => activeConversation.value?.messages || [])
 const canCreateConversation = computed(() => Boolean(selectedModel.value && selectedGroupId.value))
 
 const canSend = computed(() => {
-  return Boolean(draft.value.trim() && selectedModel.value && selectedGroupId.value && !sending.value)
+  return Boolean(
+    (draft.value.trim() || selectedImages.value.length > 0) &&
+    selectedModel.value &&
+    selectedGroupId.value &&
+    !sending.value
+  )
 })
 
 watch(selectedGroupId, () => {
@@ -528,10 +615,12 @@ async function confirmDeleteConversation(): Promise<void> {
 }
 
 async function sendMessage(): Promise<void> {
-  const content = draft.value.trim()
-  if (!content || !selectedModel.value || !selectedGroupId.value || sending.value) return
+  const text = draft.value.trim()
+  const images = selectedImages.value.map((image) => ({ ...image }))
+  if ((!text && images.length === 0) || !selectedModel.value || !selectedGroupId.value || sending.value) return
 
-  const conversation = activeConversation.value || (await createConversation(content))
+  const titleSeed = text || t('aiChat.imageConversationTitle')
+  const conversation = activeConversation.value || (await createConversation(titleSeed))
   if (!conversation) return
 
   if (!activeConversation.value) {
@@ -540,10 +629,13 @@ async function sendMessage(): Promise<void> {
   }
 
   draft.value = ''
+  selectedImages.value = []
+  resetImageInput()
   sending.value = true
   abortController.value = new AbortController()
 
-  const userMessage = makeLocalMessage(conversation.id, 'user', content)
+  const userContent = serializeChatContent(buildUserContent(text, images))
+  const userMessage = makeLocalMessage(conversation.id, 'user', userContent)
   const assistantMessage = makeLocalMessage(conversation.id, 'assistant', '')
   appendLocalMessages(conversation.id, [userMessage, assistantMessage])
   await scrollToBottom()
@@ -574,7 +666,7 @@ async function sendMessage(): Promise<void> {
   } catch (err) {
     if ((err as Error)?.name !== 'AbortError') {
       await loadConversations(conversation.id)
-      if (!hasSavedAssistantReply(conversation.id, content)) {
+      if (!hasSavedAssistantReply(conversation.id, userContent)) {
         removeLocalMessage(conversation.id, assistantMessage.id)
         appStore.showError(extractApiErrorMessage(err, t('aiChat.sendFailed')))
       }
@@ -647,22 +739,205 @@ function hasSavedAssistantReply(conversationId: number, userContent: string): bo
   const messages = conversation?.messages || []
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]
-    if (message.role !== 'user' || message.content.trim() !== userContent) continue
+    if (message.role !== 'user' || message.content.trim() !== userContent.trim()) continue
     return messages.slice(i + 1).some((item) => item.role === 'assistant' && Boolean(item.content.trim()))
   }
   return false
 }
 
-function buildRequestMessages(conversationId: number, userMessage: AIChatMessage) {
+function buildRequestMessages(conversationId: number, userMessage: AIChatMessage): ChatCompletionMessage[] {
   const conversation = conversations.value.find((item) => item.id === conversationId)
   const persistedMessages = (conversation?.messages || [])
     .filter((message) => message.id > 0 || message.id === userMessage.id)
-    .filter((message) => ['system', 'user', 'assistant'].includes(message.role) && message.content.trim())
+    .filter((message) => {
+      if (!['system', 'user', 'assistant'].includes(message.role)) return false
+      return parseMessageContent(message.content).hasContent
+    })
     .map((message) => ({
       role: message.role as 'system' | 'user' | 'assistant',
-      content: message.content
+      content: parseMessageContent(message.content).requestContent
     }))
   return persistedMessages
+}
+
+function openImagePicker(): void {
+  imageInputRef.value?.click()
+}
+
+async function handleImageSelection(event: Event): Promise<void> {
+  const input = event.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  if (files.length === 0) return
+
+  for (const file of files) {
+    if (selectedImages.value.length >= maxSelectedImages) {
+      appStore.showError(t('aiChat.imageLimit', { count: maxSelectedImages }))
+      break
+    }
+    if (!isAllowedImageFile(file)) {
+      appStore.showError(t('aiChat.imageTypeError'))
+      continue
+    }
+    if (file.size > maxImageBytes) {
+      appStore.showError(t('aiChat.imageTooLarge'))
+      continue
+    }
+    try {
+      const dataUrl = await readFileAsDataURL(file)
+      if (!isAllowedDataImageUrl(dataUrl)) {
+        appStore.showError(t('aiChat.imageTypeError'))
+        continue
+      }
+      selectedImages.value = [
+        ...selectedImages.value,
+        {
+          id: selectedImageId++,
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          dataUrl
+        }
+      ]
+    } catch {
+      appStore.showError(t('aiChat.imageReadFailed'))
+    }
+  }
+
+  resetImageInput()
+}
+
+function removeSelectedImage(id: number): void {
+  selectedImages.value = selectedImages.value.filter((image) => image.id !== id)
+  resetImageInput()
+}
+
+function resetImageInput(): void {
+  if (imageInputRef.value) {
+    imageInputRef.value.value = ''
+  }
+}
+
+function isAllowedImageFile(file: File): boolean {
+  return file.type.startsWith('image/') && allowedImageTypes.has(file.type)
+}
+
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result || ''))
+    reader.onerror = () => reject(reader.error || new Error('failed to read image'))
+    reader.readAsDataURL(file)
+  })
+}
+
+function buildUserContent(text: string, images: SelectedImage[]): ChatMessageContent {
+  if (images.length === 0) {
+    return text
+  }
+
+  const content: ChatMessageContent = []
+  if (text) {
+    content.push({ type: 'text', text })
+  }
+  for (const image of images) {
+    content.push({
+      type: 'image_url',
+      image_url: {
+        url: image.dataUrl
+      }
+    })
+  }
+  return content
+}
+
+function serializeChatContent(content: ChatMessageContent): string {
+  return typeof content === 'string' ? content : JSON.stringify(content)
+}
+
+function messageText(message: AIChatMessage): string {
+  return parseMessageContent(message.content).text
+}
+
+function messageImageUrls(message: AIChatMessage): string[] {
+  return parseMessageContent(message.content).imageUrls
+}
+
+function parseMessageContent(content: string): ParsedMessageContent {
+  const raw = content || ''
+  const trimmed = raw.trim()
+  if (trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (Array.isArray(parsed)) {
+        const parts: Exclude<ChatMessageContent, string> = []
+        const textParts: string[] = []
+        const imageUrls: string[] = []
+        for (const item of parsed) {
+          if (typeof item === 'string') {
+            if (item.trim()) {
+              textParts.push(item)
+              parts.push({ type: 'text', text: item })
+            }
+            continue
+          }
+          if (!item || typeof item !== 'object') continue
+          const record = item as Record<string, any>
+          const type = String(record.type || '').trim()
+          if ((type === 'text' || type === 'input_text' || record.text !== undefined) && typeof record.text === 'string') {
+            if (record.text.trim()) {
+              textParts.push(record.text)
+              parts.push({ type: 'text', text: record.text })
+            }
+          }
+
+          const imageUrl = extractImageUrl(record)
+          if (imageUrl) {
+            if (isAllowedDataImageUrl(imageUrl)) {
+              imageUrls.push(imageUrl)
+            }
+            parts.push({
+              type: 'image_url',
+              image_url: {
+                url: imageUrl
+              }
+            })
+          }
+        }
+
+        if (parts.length > 0) {
+          return {
+            text: textParts.join('\n'),
+            imageUrls,
+            requestContent: parts,
+            hasContent: textParts.some((part) => part.trim()) || parts.some((part) => part.type === 'image_url')
+          }
+        }
+      }
+    } catch {
+      // Fall through to plain text rendering for legacy or malformed content.
+    }
+  }
+
+  return {
+    text: raw,
+    imageUrls: [],
+    requestContent: raw,
+    hasContent: Boolean(trimmed)
+  }
+}
+
+function extractImageUrl(record: Record<string, any>): string {
+  const direct = typeof record.url === 'string' ? record.url : ''
+  const nested =
+    record.image_url && typeof record.image_url === 'object' && typeof record.image_url.url === 'string'
+      ? record.image_url.url
+      : ''
+  const flat = typeof record.image_url === 'string' ? record.image_url : ''
+  return String(nested || flat || direct).trim()
+}
+
+function isAllowedDataImageUrl(url: string): boolean {
+  return /^data:image\/(?:jpeg|jpg|png|webp|gif);base64,/i.test(url.trim())
 }
 
 function conversationTitle(conversation: AIConversation): string {
@@ -964,6 +1239,30 @@ async function scrollToBottom(): Promise<void> {
   color: rgb(148 163 184);
 }
 
+.message-image-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.625rem;
+}
+
+.message-image-grid:empty {
+  display: none;
+}
+
+.message-image-thumb {
+  height: 7rem;
+  width: 7rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgb(191 219 254);
+  object-fit: cover;
+  background: rgb(255 255 255 / 0.16);
+}
+
+.message-row-user .message-image-thumb {
+  border-color: rgb(147 197 253);
+}
+
 .empty-chat {
   display: flex;
   min-height: 100%;
@@ -1023,8 +1322,102 @@ async function scrollToBottom(): Promise<void> {
 }
 
 .composer-input {
+  flex: 1;
   min-height: 5rem;
   resize: vertical;
+}
+
+.composer-editor {
+  min-width: 0;
+}
+
+.composer-input-row {
+  display: flex;
+  min-width: 0;
+  align-items: stretch;
+  gap: 0.625rem;
+}
+
+.image-upload-button {
+  display: inline-flex;
+  width: 2.75rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.75rem;
+  border: 1px solid rgb(209 213 219);
+  background: white;
+  color: rgb(75 85 99);
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.image-upload-button:hover:not(:disabled) {
+  border-color: rgb(37 99 235);
+  color: rgb(37 99 235);
+}
+
+.image-upload-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.dark .image-upload-button {
+  border-color: rgb(51 65 85);
+  background: rgb(30 41 59);
+  color: rgb(203 213 225);
+}
+
+.dark .image-upload-button:hover:not(:disabled) {
+  border-color: rgb(96 165 250);
+  color: rgb(147 197 253);
+}
+
+.selected-image-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.625rem;
+  margin-bottom: 0.75rem;
+}
+
+.selected-image-item {
+  position: relative;
+  height: 4.75rem;
+  width: 4.75rem;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  border: 1px solid rgb(209 213 219);
+  background: white;
+}
+
+.dark .selected-image-item {
+  border-color: rgb(51 65 85);
+  background: rgb(30 41 59);
+}
+
+.selected-image-thumb {
+  height: 100%;
+  width: 100%;
+  object-fit: cover;
+}
+
+.selected-image-remove {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  display: inline-flex;
+  height: 1.5rem;
+  width: 1.5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgb(17 24 39 / 0.72);
+  color: white;
+}
+
+.selected-image-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .composer-actions {
@@ -1255,6 +1648,17 @@ async function scrollToBottom(): Promise<void> {
     font-size: 0.6875rem;
   }
 
+  .message-image-grid {
+    gap: 0.375rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .message-image-thumb {
+    height: 5.25rem;
+    width: 5.25rem;
+    border-radius: 0.625rem;
+  }
+
   .empty-chat {
     min-height: 100%;
     gap: 0.375rem;
@@ -1291,6 +1695,35 @@ async function scrollToBottom(): Promise<void> {
     grid-template-columns: minmax(0, 1fr) auto;
     align-items: end;
     gap: 0.5rem;
+  }
+
+  .composer-editor {
+    min-width: 0;
+  }
+
+  .composer-input-row {
+    gap: 0.375rem;
+  }
+
+  .image-upload-button {
+    width: 2.75rem;
+    height: 2.75rem;
+    border-radius: 999px;
+  }
+
+  .selected-image-strip {
+    grid-column: 1 / -1;
+    flex-wrap: nowrap;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    overflow-x: auto;
+    padding-bottom: 0.125rem;
+  }
+
+  .selected-image-item {
+    height: 3.75rem;
+    width: 3.75rem;
+    border-radius: 0.625rem;
   }
 
   .composer-input {
