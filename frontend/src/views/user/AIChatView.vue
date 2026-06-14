@@ -547,7 +547,10 @@ async function scrollToBottom(): Promise<void> {
 <style scoped>
 .ai-chat-shell {
   display: grid;
-  min-height: calc(100vh - 9rem);
+  grid-template-rows: auto minmax(0, 1fr);
+  height: calc(100vh - 4rem - 2rem);
+  height: calc(100dvh - 4rem - 2rem);
+  min-height: 0;
   overflow: hidden;
   border: 1px solid rgb(229 231 235);
   border-radius: 1rem;
@@ -560,9 +563,19 @@ async function scrollToBottom(): Promise<void> {
   background: rgb(15 23 42);
 }
 
+@media (min-width: 768px) {
+  .ai-chat-shell {
+    height: calc(100vh - 4rem - 3rem);
+    height: calc(100dvh - 4rem - 3rem);
+  }
+}
+
 @media (min-width: 1024px) {
   .ai-chat-shell {
     grid-template-columns: 18rem minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+    height: calc(100vh - 4rem - 4rem);
+    height: calc(100dvh - 4rem - 4rem);
   }
 }
 
@@ -571,6 +584,7 @@ async function scrollToBottom(): Promise<void> {
   min-height: 16rem;
   max-height: 18rem;
   flex-direction: column;
+  overflow: hidden;
   border-bottom: 1px solid rgb(229 231 235);
   background: rgb(249 250 251);
 }
@@ -582,6 +596,7 @@ async function scrollToBottom(): Promise<void> {
 
 @media (min-width: 1024px) {
   .conversation-panel {
+    min-height: 0;
     max-height: none;
     border-right: 1px solid rgb(229 231 235);
     border-bottom: 0;
@@ -672,13 +687,15 @@ async function scrollToBottom(): Promise<void> {
 
 .chat-panel {
   display: flex;
-  min-height: 34rem;
+  min-height: 0;
   min-width: 0;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .chat-toolbar {
   display: flex;
+  flex-shrink: 0;
   flex-direction: column;
   gap: 1rem;
   border-bottom: 1px solid rgb(229 231 235);
@@ -845,6 +862,7 @@ async function scrollToBottom(): Promise<void> {
 }
 
 .composer {
+  flex-shrink: 0;
   border-top: 1px solid rgb(229 231 235);
   padding: 1rem;
   background: rgb(249 250 251);
