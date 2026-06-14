@@ -75,6 +75,10 @@ export interface StreamChatCompletionOptions {
   onDelta?: (delta: string) => void
 }
 
+export interface UploadImageResult {
+  image_url: string
+}
+
 type RawRecord = Record<string, any>
 type ParsedSSEFrame = {
   content: string
@@ -228,6 +232,18 @@ export const userAiAPI = {
 
   async deleteConversation(id: number): Promise<void> {
     await apiClient.delete(`/user/chat/conversations/${id}`)
+  },
+
+  async uploadImage(file: File): Promise<UploadImageResult> {
+    const formData = new FormData()
+    formData.append('file', file)
+    const res = await apiClient.post('/user/files/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data'
+      },
+      timeout: 60000
+    })
+    return res.data as UploadImageResult
   },
 
   async streamChatCompletions(

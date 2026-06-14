@@ -48,7 +48,7 @@ func (s *userAIRepoStub) UpdateChatConversationAfterMessage(_ context.Context, _
 func TestUserAIServiceSaveChatTurnPreservesMultimodalUserContent(t *testing.T) {
 	repo := &userAIRepoStub{}
 	svc := NewUserAIService(repo, nil, nil)
-	content := `[{"type":"text","text":"Describe this"},{"type":"image_url","image_url":{"url":"data:image/png;base64,abc123"}}]`
+	content := `[{"type":"text","text":"Describe this"},{"type":"image_url","image_url":{"url":"/uploads/user_ai/7/image.png"}}]`
 
 	if err := svc.SaveChatTurn(context.Background(), 7, 11, nil, "gpt-4o", content, "It is a chart."); err != nil {
 		t.Fatalf("SaveChatTurn returned error: %v", err)
@@ -66,7 +66,7 @@ func TestUserAIServiceSaveChatTurnPreservesMultimodalUserContent(t *testing.T) {
 }
 
 func TestChatMessageContentSummaryUsesImageFallback(t *testing.T) {
-	title, hasImage := chatMessageContentSummary(`[{"type":"image_url","image_url":{"url":"data:image/png;base64,abc123"}}]`)
+	title, hasImage := chatMessageContentSummary(`[{"type":"image_url","image_url":{"url":"/uploads/user_ai/7/image.png"}}]`)
 	if title != "" || !hasImage {
 		t.Fatalf("expected empty title and image flag, got title=%q hasImage=%v", title, hasImage)
 	}

@@ -210,7 +210,7 @@
                 :key="image.id"
                 class="selected-image-item"
               >
-                <img :src="image.dataUrl" :alt="image.name" class="selected-image-thumb" />
+                <img :src="image.imageUrl" :alt="image.name" class="selected-image-thumb" />
                 <button
                   type="button"
                   class="selected-image-remove"
@@ -223,6 +223,10 @@
                 </button>
               </div>
             </div>
+            <div v-if="imageUploading" class="image-upload-progress">
+              <Icon name="refresh" size="sm" class="animate-spin" />
+              <span>{{ t('aiChat.imageUploading') }}</span>
+            </div>
             <div class="composer-input-row">
               <input
                 ref="imageInputRef"
@@ -230,7 +234,7 @@
                 type="file"
                 accept="image/jpeg,image/png,image/webp,image/gif"
                 multiple
-                :disabled="sending || selectedImages.length >= maxSelectedImages"
+                :disabled="sending || imageUploading || selectedImages.length >= maxSelectedImages"
                 @change="handleImageSelection"
               />
               <button
@@ -238,10 +242,11 @@
                 class="image-upload-button"
                 :title="t('aiChat.uploadImage')"
                 :aria-label="t('aiChat.uploadImage')"
-                :disabled="sending || selectedImages.length >= maxSelectedImages"
+                :disabled="sending || imageUploading || selectedImages.length >= maxSelectedImages"
                 @click="openImagePicker"
               >
-                <Icon name="upload" size="sm" />
+                <Icon v-if="imageUploading" name="refresh" size="sm" class="animate-spin" />
+                <Icon v-else name="upload" size="sm" />
               </button>
               <textarea
                 ref="inputRef"
@@ -422,6 +427,7 @@ const selectedImages = ref<SelectedImage[]>([])
 const loadingModels = ref(false)
 const loadingConversations = ref(false)
 const sending = ref(false)
+const imageUploading = ref(false)
 const pendingDeleteId = ref<number | null>(null)
 const abortController = ref<AbortController | null>(null)
 const messagesContainerRef = ref<HTMLElement | null>(null)
@@ -432,7 +438,10 @@ let tempMessageId = -1
 let selectedImageId = 1
 
 const maxSelectedImages = 3
-const maxImageBytes = 5 * 1024 * 1024
+const maxOriginalImageBytes = 20 * 1024 * 1024
+const maxCompressedImageBytes = 2 * 1024 * 1024
+const maxImageDimension = 1600
+const imageJPEGQuality = 0.82
 const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
 interface SelectedImage {
@@ -440,7 +449,7 @@ interface SelectedImage {
   name: string
   type: string
   size: number
-  dataUrl: string
+  imageUrl: string
 }
 
 interface ParsedMessageContent {
@@ -491,6 +500,7 @@ const canSend = computed(() => {
     (draft.value.trim() || selectedImages.value.length > 0) &&
     selectedModel.value &&
     selectedGroupId.value &&
+    !imageUploading.value &&
     !sending.value
   )
 })
@@ -761,6 +771,7 @@ function buildRequestMessages(conversationId: number, userMessage: AIChatMessage
 }
 
 function openImagePicker(): void {
+  if (sending.value || imageUploading.value || selectedImages.value.length >= maxSelectedImages) return
   imageInputRef.value?.click()
 }
 
@@ -769,41 +780,51 @@ async function handleImageSelection(event: Event): Promise<void> {
   const files = Array.from(input.files || [])
   if (files.length === 0) return
 
-  for (const file of files) {
-    if (selectedImages.value.length >= maxSelectedImages) {
-      appStore.showError(t('aiChat.imageLimit', { count: maxSelectedImages }))
-      break
-    }
-    if (!isAllowedImageFile(file)) {
-      appStore.showError(t('aiChat.imageTypeError'))
-      continue
-    }
-    if (file.size > maxImageBytes) {
-      appStore.showError(t('aiChat.imageTooLarge'))
-      continue
-    }
-    try {
-      const dataUrl = await readFileAsDataURL(file)
-      if (!isAllowedDataImageUrl(dataUrl)) {
+  imageUploading.value = true
+  try {
+    for (const file of files) {
+      if (selectedImages.value.length >= maxSelectedImages) {
+        appStore.showError(t('aiChat.imageLimit', { count: maxSelectedImages }))
+        break
+      }
+      if (!isAllowedImageFile(file)) {
         appStore.showError(t('aiChat.imageTypeError'))
         continue
       }
-      selectedImages.value = [
-        ...selectedImages.value,
-        {
-          id: selectedImageId++,
-          name: file.name,
-          type: file.type,
-          size: file.size,
-          dataUrl
+      if (file.size > maxOriginalImageBytes) {
+        appStore.showError(t('aiChat.imageTooLarge'))
+        continue
+      }
+      try {
+        const compressed = await compressImageForChat(file)
+        if (compressed.size > maxCompressedImageBytes) {
+          appStore.showError(t('aiChat.imageCompressedTooLarge'))
+          continue
         }
-      ]
-    } catch {
-      appStore.showError(t('aiChat.imageReadFailed'))
+        const uploaded = await userAiAPI.uploadImage(compressed)
+        const imageUrl = uploaded.image_url?.trim()
+        if (!isAllowedUploadedImageUrl(imageUrl)) {
+          appStore.showError(t('aiChat.imageUploadFailed'))
+          continue
+        }
+        selectedImages.value = [
+          ...selectedImages.value,
+          {
+            id: selectedImageId++,
+            name: file.name,
+            type: compressed.type,
+            size: compressed.size,
+            imageUrl
+          }
+        ]
+      } catch {
+        appStore.showError(t('aiChat.imageUploadFailed'))
+      }
     }
+  } finally {
+    imageUploading.value = false
+    resetImageInput()
   }
-
-  resetImageInput()
 }
 
 function removeSelectedImage(id: number): void {
@@ -821,12 +842,93 @@ function isAllowedImageFile(file: File): boolean {
   return file.type.startsWith('image/') && allowedImageTypes.has(file.type)
 }
 
-function readFileAsDataURL(file: File): Promise<string> {
+async function compressImageForChat(file: File): Promise<File> {
+  const bitmap = await loadImageBitmap(file)
+  try {
+    const { width, height } = fitImageDimensions(bitmap.width, bitmap.height, maxImageDimension)
+    const canvas = document.createElement('canvas')
+    canvas.width = width
+    canvas.height = height
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      throw new Error('canvas context unavailable')
+    }
+    ctx.drawImage(bitmap, 0, 0, width, height)
+    const blob = await canvasToJPEGBlob(canvas, imageJPEGQuality)
+    const baseName = file.name.replace(/\.[^.]*$/, '') || 'image'
+    return new File([blob], `${baseName}.jpg`, {
+      type: 'image/jpeg',
+      lastModified: Date.now()
+    })
+  } finally {
+    if ('close' in bitmap && typeof bitmap.close === 'function') {
+      bitmap.close()
+    }
+  }
+}
+
+async function loadImageBitmap(file: File): Promise<ImageBitmap> {
+  if ('createImageBitmap' in window) {
+    try {
+      return await createImageBitmap(file)
+    } catch {
+      // Fall through for browsers that expose createImageBitmap but cannot decode this input.
+    }
+  }
+  return loadImageBitmapWithElement(file)
+}
+
+function loadImageBitmapWithElement(file: File): Promise<ImageBitmap> {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(reader.error || new Error('failed to read image'))
-    reader.readAsDataURL(file)
+    const objectUrl = URL.createObjectURL(file)
+    const image = new Image()
+    image.onload = async () => {
+      try {
+        const canvas = document.createElement('canvas')
+        canvas.width = image.naturalWidth
+        canvas.height = image.naturalHeight
+        const ctx = canvas.getContext('2d')
+        if (!ctx) throw new Error('canvas context unavailable')
+        ctx.drawImage(image, 0, 0)
+        resolve(await createImageBitmap(canvas))
+      } catch (err) {
+        reject(err)
+      } finally {
+        URL.revokeObjectURL(objectUrl)
+      }
+    }
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl)
+      reject(new Error('failed to decode image'))
+    }
+    image.src = objectUrl
+  })
+}
+
+function fitImageDimensions(width: number, height: number, maxDimension: number): { width: number; height: number } {
+  if (width <= 0 || height <= 0) {
+    throw new Error('invalid image dimensions')
+  }
+  const scale = Math.min(1, maxDimension / Math.max(width, height))
+  return {
+    width: Math.max(1, Math.round(width * scale)),
+    height: Math.max(1, Math.round(height * scale))
+  }
+}
+
+function canvasToJPEGBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error('failed to encode image'))
+          return
+        }
+        resolve(blob)
+      },
+      'image/jpeg',
+      quality
+    )
   })
 }
 
@@ -843,7 +945,7 @@ function buildUserContent(text: string, images: SelectedImage[]): ChatMessageCon
     content.push({
       type: 'image_url',
       image_url: {
-        url: image.dataUrl
+        url: image.imageUrl
       }
     })
   }
@@ -892,25 +994,23 @@ function parseMessageContent(content: string): ParsedMessageContent {
 
           const imageUrl = extractImageUrl(record)
           if (imageUrl) {
-            if (isAllowedDataImageUrl(imageUrl)) {
+            if (isAllowedUploadedImageUrl(imageUrl)) {
               imageUrls.push(imageUrl)
+              parts.push({
+                type: 'image_url',
+                image_url: {
+                  url: imageUrl
+                }
+              })
             }
-            parts.push({
-              type: 'image_url',
-              image_url: {
-                url: imageUrl
-              }
-            })
           }
         }
 
-        if (parts.length > 0) {
-          return {
-            text: textParts.join('\n'),
-            imageUrls,
-            requestContent: parts,
-            hasContent: textParts.some((part) => part.trim()) || parts.some((part) => part.type === 'image_url')
-          }
+        return {
+          text: textParts.join('\n'),
+          imageUrls,
+          requestContent: parts,
+          hasContent: textParts.some((part) => part.trim()) || parts.some((part) => part.type === 'image_url')
         }
       }
     } catch {
@@ -936,8 +1036,12 @@ function extractImageUrl(record: Record<string, any>): string {
   return String(nested || flat || direct).trim()
 }
 
-function isAllowedDataImageUrl(url: string): boolean {
-  return /^data:image\/(?:jpeg|jpg|png|webp|gif);base64,/i.test(url.trim())
+function isAllowedUploadedImageUrl(url: string): boolean {
+  const trimmed = url.trim()
+  if (/^data:image\/(?:jpeg|jpg|png|webp|gif);base64,/i.test(trimmed)) {
+    return false
+  }
+  return /^\/uploads\/user_ai\/\d+\/[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp|gif)$/i.test(trimmed) || /^https?:\/\//i.test(trimmed)
 }
 
 function conversationTitle(conversation: AIConversation): string {
@@ -1379,6 +1483,20 @@ async function scrollToBottom(): Promise<void> {
   margin-bottom: 0.75rem;
 }
 
+.image-upload-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgb(75 85 99);
+}
+
+.dark .image-upload-progress {
+  color: rgb(203 213 225);
+}
+
 .selected-image-item {
   position: relative;
   height: 4.75rem;
@@ -1718,6 +1836,11 @@ async function scrollToBottom(): Promise<void> {
     margin-bottom: 0.5rem;
     overflow-x: auto;
     padding-bottom: 0.125rem;
+  }
+
+  .image-upload-progress {
+    grid-column: 1 / -1;
+    margin-bottom: 0.5rem;
   }
 
   .selected-image-item {

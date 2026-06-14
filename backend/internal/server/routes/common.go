@@ -6,6 +6,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const userAIUploadsDir = "/app/data/uploads/user_ai"
+
 // RegisterCommonRoutes 注册通用路由（健康检查、状态等）
 func RegisterCommonRoutes(r *gin.Engine) {
 	// 健康检查
@@ -29,4 +31,6 @@ func RegisterCommonRoutes(r *gin.Engine) {
 			},
 		})
 	})
+
+	r.StaticFS("/uploads/user_ai", gin.Dir(userAIUploadsDir, false))
 }

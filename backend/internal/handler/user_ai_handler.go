@@ -26,13 +26,23 @@ const (
 )
 
 type UserAIHandler struct {
-	userAIService *service.UserAIService
-	gateway       *GatewayHandler
-	openAIGateway *OpenAIGatewayHandler
+	userAIService     *service.UserAIService
+	gateway           *GatewayHandler
+	openAIGateway     *OpenAIGatewayHandler
+	uploadRoot        string
+	uploadPublicRoot  string
+	uploadMaxFileSize int64
 }
 
 func NewUserAIHandler(userAIService *service.UserAIService, gateway *GatewayHandler, openAIGateway *OpenAIGatewayHandler) *UserAIHandler {
-	return &UserAIHandler{userAIService: userAIService, gateway: gateway, openAIGateway: openAIGateway}
+	return &UserAIHandler{
+		userAIService:     userAIService,
+		gateway:           gateway,
+		openAIGateway:     openAIGateway,
+		uploadRoot:        userAIUploadRoot,
+		uploadPublicRoot:  userAIUploadPublicRoot,
+		uploadMaxFileSize: userAIUploadMaxFileSize,
+	}
 }
 
 func (h *UserAIHandler) Models(c *gin.Context) {
@@ -145,6 +155,11 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 		c.Abort()
 		return
 	}
+	if userAIRequestHasDataImageURL(body) {
+		response.BadRequest(c, "Images must be uploaded first and referenced by image_url")
+		c.Abort()
+		return
+	}
 
 	model := strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	if model == "" {
@@ -180,6 +195,7 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 
 	delete(payload, "conversation_id")
 	delete(payload, "group_id")
+	rewriteUserAIRelativeImageURLs(payload, userAIRequestBaseURL(c))
 	cleanBody, err := json.Marshal(payload)
 	if err != nil {
 		response.BadRequest(c, "Invalid request body")
@@ -351,6 +367,130 @@ func extractMessageContent(content gjson.Result) string {
 		return strings.Join(parts, "\n")
 	}
 	return strings.TrimSpace(content.Raw)
+}
+
+func userAIRequestHasDataImageURL(body []byte) bool {
+	messages := gjson.GetBytes(body, "messages")
+	if !messages.IsArray() {
+		return false
+	}
+	for _, message := range messages.Array() {
+		content := message.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		for _, item := range content.Array() {
+			if userAIContentPartHasDataImageURL(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func userAIContentPartHasDataImageURL(item gjson.Result) bool {
+	if isUserAIDataImageURL(item.Get("image_url.url").String()) {
+		return true
+	}
+	if isUserAIDataImageURL(item.Get("image_url").String()) {
+		return true
+	}
+	return isUserAIDataImageURL(item.Get("url").String())
+}
+
+func isUserAIDataImageURL(url string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(url))
+	if !strings.HasPrefix(normalized, "data:image/") {
+		return false
+	}
+	return strings.Contains(normalized, ";base64,")
+}
+
+func rewriteUserAIRelativeImageURLs(payload map[string]any, baseURL string) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	if baseURL == "" {
+		return
+	}
+	messages, ok := payload["messages"].([]any)
+	if !ok {
+		return
+	}
+	for _, message := range messages {
+		record, ok := message.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, ok := record["content"].([]any)
+		if !ok {
+			continue
+		}
+		for _, part := range content {
+			partRecord, ok := part.(map[string]any)
+			if !ok {
+				continue
+			}
+			rewriteUserAIImageURLField(partRecord, "url", baseURL)
+			switch imageURL := partRecord["image_url"].(type) {
+			case string:
+				if rewritten := userAIAbsoluteImageURL(imageURL, baseURL); rewritten != "" {
+					partRecord["image_url"] = rewritten
+				}
+			case map[string]any:
+				rewriteUserAIImageURLField(imageURL, "url", baseURL)
+			}
+		}
+	}
+}
+
+func rewriteUserAIImageURLField(record map[string]any, key, baseURL string) {
+	value, ok := record[key].(string)
+	if !ok {
+		return
+	}
+	if rewritten := userAIAbsoluteImageURL(value, baseURL); rewritten != "" {
+		record[key] = rewritten
+	}
+}
+
+func userAIAbsoluteImageURL(url, baseURL string) string {
+	trimmed := strings.TrimSpace(url)
+	if !strings.HasPrefix(trimmed, userAIUploadPublicRoot+"/") {
+		return ""
+	}
+	return strings.TrimRight(baseURL, "/") + trimmed
+}
+
+func userAIRequestBaseURL(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	host := firstForwardedHeaderValue(c.GetHeader("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(c.Request.Host)
+	}
+	if host == "" {
+		return ""
+	}
+	proto := firstForwardedHeaderValue(c.GetHeader("X-Forwarded-Proto"))
+	if proto == "" {
+		if c.Request.TLS != nil {
+			proto = "https"
+		} else {
+			proto = "http"
+		}
+	}
+	return strings.ToLower(proto) + "://" + host
+}
+
+func firstForwardedHeaderValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if idx := strings.Index(value, ","); idx >= 0 {
+		value = value[:idx]
+	}
+	return strings.TrimSpace(value)
 }
 
 func extractAssistantContent(raw string) string {

@@ -39,6 +39,11 @@ func RegisterUserRoutes(
 			user.GET("/platform-quotas", h.User.GetMyPlatformQuotas)
 			user.GET("/ai/models", h.UserAI.Models)
 
+			files := user.Group("/files")
+			{
+				files.POST("/upload", middleware.RequestBodyLimit(handler.UserAIUploadRequestBodyLimit), h.UserAI.UploadImage)
+			}
+
 			chat := user.Group("/chat")
 			{
 				chat.GET("/conversations", h.UserAI.ListChatConversations)
