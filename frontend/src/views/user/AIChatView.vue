@@ -79,6 +79,51 @@
       </aside>
 
       <section class="chat-panel">
+        <header class="mobile-chat-header">
+          <div class="mobile-title-row">
+            <div class="min-w-0">
+              <h2 class="truncate text-lg font-semibold text-gray-900 dark:text-white">
+                {{ t('aiChat.title') }}
+              </h2>
+              <p class="truncate text-xs text-gray-500 dark:text-dark-400">
+                {{ activeConversation ? conversationTitle(activeConversation) : t('aiChat.emptyTitle') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              class="mobile-conversations-button"
+              @click="mobileConversationsOpen = true"
+            >
+              <Icon name="chat" size="sm" />
+              <span>{{ t('aiChat.conversations') }}</span>
+            </button>
+          </div>
+
+          <div class="mobile-model-controls">
+            <label class="mobile-select-pill">
+              <span>{{ t('aiChat.modelGroup') }}:</span>
+              <Select
+                v-model="selectedGroupIdValue"
+                :options="groupOptions"
+                :placeholder="t('aiChat.selectGroup')"
+                :disabled="loadingModels || sending || groupOptions.length === 0"
+                :empty-text="t('aiChat.noModels')"
+              />
+            </label>
+            <label class="mobile-select-pill">
+              <span>{{ t('aiChat.model') }}:</span>
+              <Select
+                v-model="selectedModel"
+                :options="modelOptions"
+                :placeholder="loadingModels ? t('aiChat.loadingModels') : t('aiChat.selectModel')"
+                :disabled="loadingModels || sending || modelOptions.length === 0"
+                :searchable="true"
+                :empty-text="t('aiChat.noModels')"
+              />
+            </label>
+          </div>
+        </header>
+
         <header class="chat-toolbar">
           <div class="min-w-0">
             <h2 class="truncate text-base font-semibold text-gray-900 dark:text-white">
@@ -185,6 +230,98 @@
       </section>
     </div>
 
+    <Teleport to="body">
+      <Transition name="mobile-drawer-fade">
+        <div
+          v-if="mobileConversationsOpen"
+          class="mobile-conversation-overlay"
+          @click="mobileConversationsOpen = false"
+        ></div>
+      </Transition>
+      <Transition name="mobile-drawer-slide">
+        <aside
+          v-if="mobileConversationsOpen"
+          class="mobile-conversation-drawer"
+          role="dialog"
+          aria-modal="true"
+          :aria-label="t('aiChat.conversations')"
+        >
+          <div class="mobile-drawer-header">
+            <div>
+              <h2>{{ t('aiChat.conversations') }}</h2>
+              <p>{{ conversations.length }}</p>
+            </div>
+            <button
+              type="button"
+              class="mobile-drawer-close"
+              :title="t('common.cancel')"
+              @click="mobileConversationsOpen = false"
+            >
+              <Icon name="x" size="sm" />
+            </button>
+          </div>
+
+          <div class="mobile-drawer-actions">
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm"
+              :disabled="loadingConversations"
+              @click="loadConversations(activeConversationId)"
+            >
+              <Icon name="refresh" size="sm" :class="{ 'animate-spin': loadingConversations }" />
+              <span>{{ t('common.refresh') }}</span>
+            </button>
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              :disabled="!canCreateConversation"
+              @click="startNewConversation"
+            >
+              <Icon name="plus" size="sm" />
+              <span>{{ t('aiChat.newConversation') }}</span>
+            </button>
+          </div>
+
+          <div class="mobile-drawer-list">
+            <button
+              v-for="conversation in conversations"
+              :key="conversation.id"
+              type="button"
+              class="conversation-item"
+              :class="{ 'conversation-item-active': conversation.id === activeConversationId }"
+              @click="selectConversation(conversation.id)"
+            >
+              <span class="min-w-0 flex-1 text-left">
+                <span class="block truncate text-sm font-medium">
+                  {{ conversationTitle(conversation) }}
+                </span>
+                <span class="mt-1 flex items-center gap-2 text-xs text-gray-500 dark:text-dark-400">
+                  <span class="truncate">{{ conversation.model || t('aiChat.noModel') }}</span>
+                  <span class="h-1 w-1 rounded-full bg-gray-300 dark:bg-dark-500"></span>
+                  <span class="shrink-0">{{ formatRelativeTime(conversation.updated_at || conversation.created_at) }}</span>
+                </span>
+              </span>
+              <span
+                class="conversation-delete"
+                role="button"
+                tabindex="0"
+                :title="t('aiChat.deleteConversation')"
+                @click.stop="requestDeleteConversation(conversation.id)"
+                @keydown.enter.stop.prevent="requestDeleteConversation(conversation.id)"
+              >
+                <Icon name="trash" size="sm" />
+              </span>
+            </button>
+
+            <div v-if="!loadingConversations && conversations.length === 0" class="empty-conversations">
+              <Icon name="chat" size="lg" />
+              <span>{{ t('aiChat.noConversations') }}</span>
+            </div>
+          </div>
+        </aside>
+      </Transition>
+    </Teleport>
+
     <ConfirmDialog
       :show="pendingDeleteId !== null"
       :title="t('aiChat.deleteConversation')"
@@ -228,6 +365,7 @@ const pendingDeleteId = ref<number | null>(null)
 const abortController = ref<AbortController | null>(null)
 const messagesContainerRef = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLTextAreaElement | null>(null)
+const mobileConversationsOpen = ref(false)
 let tempMessageId = -1
 
 marked.use({ gfm: true, breaks: true })
@@ -341,6 +479,7 @@ async function startNewConversation(): Promise<void> {
   if (!conversation) return
   conversations.value = [conversation, ...conversations.value.filter((item) => item.id !== conversation.id)]
   activeConversationId.value = conversation.id
+  mobileConversationsOpen.value = false
   await nextTick()
   inputRef.value?.focus()
 }
@@ -362,6 +501,7 @@ async function createConversation(title: string): Promise<AIConversation | null>
 function selectConversation(id: number): void {
   if (sending.value) return
   activeConversationId.value = id
+  mobileConversationsOpen.value = false
 }
 
 function requestDeleteConversation(id: number): void {
@@ -558,6 +698,10 @@ async function scrollToBottom(): Promise<void> {
   box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
 }
 
+.mobile-chat-header {
+  display: none;
+}
+
 .dark .ai-chat-shell {
   border-color: rgb(51 65 85);
   background: rgb(15 23 42);
@@ -683,6 +827,11 @@ async function scrollToBottom(): Promise<void> {
 
 .dark .empty-conversations {
   color: rgb(148 163 184);
+}
+
+.mobile-conversation-overlay,
+.mobile-conversation-drawer {
+  display: none;
 }
 
 .chat-panel {
@@ -953,5 +1102,344 @@ async function scrollToBottom(): Promise<void> {
 .dark .markdown-body :deep(blockquote) {
   border-left-color: rgb(71 85 105);
   color: rgb(203 213 225);
+}
+
+@media (max-width: 767px) {
+  .ai-chat-shell {
+    height: calc(100vh - 4rem - 1px);
+    height: calc(100dvh - 4rem - 1px);
+    margin: -1rem;
+    grid-template-rows: minmax(0, 1fr);
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .conversation-panel,
+  .chat-toolbar {
+    display: none;
+  }
+
+  .mobile-chat-header {
+    display: flex;
+    flex-shrink: 0;
+    flex-direction: column;
+    gap: 0.625rem;
+    border-bottom: 1px solid rgb(229 231 235);
+    background: rgb(255 255 255 / 0.94);
+    padding: 0.75rem 0.875rem 0.625rem;
+    backdrop-filter: blur(16px);
+  }
+
+  .dark .mobile-chat-header {
+    border-color: rgb(51 65 85);
+    background: rgb(15 23 42 / 0.94);
+  }
+
+  .mobile-title-row {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
+
+  .mobile-conversations-button {
+    display: inline-flex;
+    height: 2.25rem;
+    flex-shrink: 0;
+    align-items: center;
+    gap: 0.375rem;
+    border-radius: 999px;
+    border: 1px solid rgb(209 213 219);
+    padding: 0 0.75rem;
+    font-size: 0.8125rem;
+    font-weight: 700;
+    color: rgb(55 65 81);
+    background: white;
+  }
+
+  .dark .mobile-conversations-button {
+    border-color: rgb(71 85 105);
+    color: rgb(226 232 240);
+    background: rgb(30 41 59);
+  }
+
+  .mobile-model-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+    gap: 0.5rem;
+  }
+
+  .mobile-select-pill {
+    display: grid;
+    min-width: 0;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 0.375rem;
+    border-radius: 999px;
+    border: 1px solid rgb(229 231 235);
+    background: rgb(249 250 251);
+    padding: 0.25rem 0.375rem 0.25rem 0.625rem;
+    color: rgb(75 85 99);
+  }
+
+  .dark .mobile-select-pill {
+    border-color: rgb(51 65 85);
+    background: rgb(30 41 59 / 0.72);
+    color: rgb(203 213 225);
+  }
+
+  .mobile-select-pill > span {
+    min-width: 0;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .mobile-select-pill :deep(.select-trigger) {
+    min-height: 1.75rem;
+    border: 0;
+    background: transparent;
+    padding: 0 0.125rem;
+    box-shadow: none;
+  }
+
+  .mobile-select-pill :deep(.select-value) {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: rgb(17 24 39);
+  }
+
+  .dark .mobile-select-pill :deep(.select-value) {
+    color: rgb(248 250 252);
+  }
+
+  .chat-panel {
+    min-height: 0;
+    background: rgb(255 255 255);
+  }
+
+  .dark .chat-panel {
+    background: rgb(15 23 42);
+  }
+
+  .messages-panel {
+    flex: 1 1 auto;
+    padding: 0.875rem 0.75rem 0.75rem;
+  }
+
+  .message-list {
+    gap: 0.625rem;
+  }
+
+  .message-bubble {
+    max-width: 85%;
+    border-radius: 1rem;
+    padding: 0.625rem 0.75rem;
+    font-size: 0.9375rem;
+    line-height: 1.55;
+  }
+
+  .message-row-user .message-bubble {
+    border-bottom-right-radius: 0.375rem;
+  }
+
+  .message-row-assistant .message-bubble {
+    border-bottom-left-radius: 0.375rem;
+  }
+
+  .message-meta {
+    margin-bottom: 0.25rem;
+    gap: 0.375rem;
+    font-size: 0.6875rem;
+  }
+
+  .empty-chat {
+    min-height: 100%;
+    gap: 0.375rem;
+    padding: 0 1.5rem;
+  }
+
+  .empty-chat-icon {
+    display: none;
+  }
+
+  .empty-chat h3 {
+    font-size: 1rem;
+  }
+
+  .empty-chat p {
+    max-width: 15rem;
+    font-size: 0.8125rem;
+  }
+
+  .composer {
+    border-top: 1px solid rgb(229 231 235);
+    background: rgb(255 255 255 / 0.95);
+    padding: 0.5rem 0.625rem calc(0.5rem + env(safe-area-inset-bottom));
+    backdrop-filter: blur(16px);
+  }
+
+  .dark .composer {
+    border-color: rgb(51 65 85);
+    background: rgb(15 23 42 / 0.95);
+  }
+
+  .composer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 0.5rem;
+  }
+
+  .composer-input {
+    height: 2.75rem;
+    min-height: 2.75rem;
+    max-height: 5rem;
+    resize: none;
+    border-radius: 1.375rem;
+    padding: 0.6875rem 0.875rem;
+    line-height: 1.35;
+  }
+
+  .composer-actions {
+    margin-top: 0;
+    display: contents;
+  }
+
+  .composer-actions > p {
+    display: none;
+  }
+
+  .composer-actions > div {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+  }
+
+  .composer-actions .btn {
+    height: 2.75rem;
+    min-width: 2.75rem;
+    border-radius: 999px;
+    padding: 0;
+  }
+
+  .composer-actions .btn span {
+    display: none;
+  }
+
+  .markdown-body {
+    line-height: 1.55;
+  }
+
+  .mobile-conversation-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100000030;
+    display: block;
+    background: rgb(15 23 42 / 0.42);
+  }
+
+  .mobile-conversation-drawer {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 100000031;
+    display: flex;
+    width: min(22rem, 88vw);
+    flex-direction: column;
+    border-right: 1px solid rgb(229 231 235);
+    background: white;
+    box-shadow: 18px 0 40px rgb(15 23 42 / 0.18);
+  }
+
+  .dark .mobile-conversation-drawer {
+    border-color: rgb(51 65 85);
+    background: rgb(15 23 42);
+  }
+
+  .mobile-drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border-bottom: 1px solid rgb(229 231 235);
+    padding: calc(0.875rem + env(safe-area-inset-top)) 1rem 0.875rem;
+  }
+
+  .dark .mobile-drawer-header {
+    border-color: rgb(51 65 85);
+  }
+
+  .mobile-drawer-header h2 {
+    font-size: 1rem;
+    font-weight: 800;
+    color: rgb(17 24 39);
+  }
+
+  .mobile-drawer-header p {
+    margin-top: 0.125rem;
+    font-size: 0.75rem;
+    color: rgb(107 114 128);
+  }
+
+  .dark .mobile-drawer-header h2 {
+    color: white;
+  }
+
+  .dark .mobile-drawer-header p {
+    color: rgb(148 163 184);
+  }
+
+  .mobile-drawer-close {
+    display: inline-flex;
+    height: 2rem;
+    width: 2rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 999px;
+    color: rgb(75 85 99);
+    background: rgb(243 244 246);
+  }
+
+  .dark .mobile-drawer-close {
+    color: rgb(226 232 240);
+    background: rgb(30 41 59);
+  }
+
+  .mobile-drawer-actions {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.5rem;
+    padding: 0.75rem;
+  }
+
+  .mobile-drawer-actions .btn-primary {
+    justify-content: center;
+  }
+
+  .mobile-drawer-list {
+    min-height: 0;
+    flex: 1;
+    overflow-y: auto;
+    padding: 0 0.75rem 1rem;
+  }
+
+  .mobile-drawer-fade-enter-active,
+  .mobile-drawer-fade-leave-active,
+  .mobile-drawer-slide-enter-active,
+  .mobile-drawer-slide-leave-active {
+    transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+
+  .mobile-drawer-fade-enter-from,
+  .mobile-drawer-fade-leave-to {
+    opacity: 0;
+  }
+
+  .mobile-drawer-slide-enter-from,
+  .mobile-drawer-slide-leave-to {
+    transform: translateX(-100%);
+  }
 }
 </style>
