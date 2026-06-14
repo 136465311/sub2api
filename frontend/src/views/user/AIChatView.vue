@@ -410,7 +410,7 @@ async function sendMessage(): Promise<void> {
 
   try {
     const requestMessages = buildRequestMessages(conversation.id, userMessage)
-    await userAiAPI.streamChatCompletions(
+    const streamedContent = await userAiAPI.streamChatCompletions(
       {
         model: selectedModel.value,
         group_id: selectedGroupId.value,
@@ -421,16 +421,23 @@ async function sendMessage(): Promise<void> {
       {
         signal: abortController.value.signal,
         onDelta: async (delta) => {
-          assistantMessage.content += delta
+          appendAssistantDelta(conversation.id, assistantMessage.id, delta)
           await scrollToBottom()
         }
       }
     )
+    if (!getLocalMessageContent(conversation.id, assistantMessage.id) && streamedContent) {
+      updateLocalMessageContent(conversation.id, assistantMessage.id, streamedContent)
+      await scrollToBottom()
+    }
     await loadConversations(conversation.id)
   } catch (err) {
     if ((err as Error)?.name !== 'AbortError') {
-      removeLocalMessage(conversation.id, assistantMessage.id)
-      appStore.showError(extractApiErrorMessage(err, t('aiChat.sendFailed')))
+      await loadConversations(conversation.id)
+      if (!hasSavedAssistantReply(conversation.id, content)) {
+        removeLocalMessage(conversation.id, assistantMessage.id)
+        appStore.showError(extractApiErrorMessage(err, t('aiChat.sendFailed')))
+      }
     }
   } finally {
     sending.value = false
@@ -470,6 +477,40 @@ function removeLocalMessage(conversationId: number, messageId: number): void {
   const conversation = conversations.value.find((item) => item.id === conversationId)
   if (!conversation) return
   conversation.messages = conversation.messages.filter((item) => item.id !== messageId)
+}
+
+function findLocalMessage(conversationId: number, messageId: number): AIChatMessage | null {
+  const conversation = conversations.value.find((item) => item.id === conversationId)
+  return conversation?.messages.find((item) => item.id === messageId) || null
+}
+
+function getLocalMessageContent(conversationId: number, messageId: number): string {
+  return findLocalMessage(conversationId, messageId)?.content || ''
+}
+
+function updateLocalMessageContent(conversationId: number, messageId: number, content: string): void {
+  const message = findLocalMessage(conversationId, messageId)
+  if (message) {
+    message.content = content
+  }
+}
+
+function appendAssistantDelta(conversationId: number, messageId: number, delta: string): void {
+  const message = findLocalMessage(conversationId, messageId)
+  if (message) {
+    message.content = `${message.content || ''}${delta}`
+  }
+}
+
+function hasSavedAssistantReply(conversationId: number, userContent: string): boolean {
+  const conversation = conversations.value.find((item) => item.id === conversationId)
+  const messages = conversation?.messages || []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role !== 'user' || message.content.trim() !== userContent) continue
+    return messages.slice(i + 1).some((item) => item.role === 'assistant' && Boolean(item.content.trim()))
+  }
+  return false
 }
 
 function buildRequestMessages(conversationId: number, userMessage: AIChatMessage) {

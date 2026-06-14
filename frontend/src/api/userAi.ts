@@ -62,6 +62,10 @@ export interface StreamChatCompletionOptions {
 }
 
 type RawRecord = Record<string, any>
+type ParsedSSEFrame = {
+  content: string
+  done: boolean
+}
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '')
 
@@ -116,15 +120,35 @@ function authHeaders(): HeadersInit {
   return headers
 }
 
+function stringifyContent(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === 'string') return item
+        if (item && typeof item === 'object') {
+          const record = item as RawRecord
+          return String(record.text ?? record.content ?? '')
+        }
+        return ''
+      })
+      .join('')
+  }
+  return ''
+}
+
 function extractAssistantContent(payload: any): string {
   const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null
-  return String(
-    choice?.delta?.content ??
-      choice?.message?.content ??
-      payload?.delta?.content ??
-      payload?.message?.content ??
-      payload?.output_text ??
-      ''
+  return (
+    stringifyContent(choice?.delta?.content) ||
+    stringifyContent(choice?.message?.content) ||
+    stringifyContent(payload?.delta?.content) ||
+    stringifyContent(payload?.delta?.text) ||
+    stringifyContent(typeof payload?.delta === 'string' ? payload.delta : '') ||
+    stringifyContent(payload?.message?.content) ||
+    stringifyContent(payload?.output_text) ||
+    stringifyContent(payload?.text) ||
+    stringifyContent(payload?.content)
   )
 }
 
@@ -139,27 +163,32 @@ async function readErrorMessage(response: Response): Promise<string> {
   }
 }
 
-function parseSSEFrame(frame: string, onDelta?: (delta: string) => void): string {
-  let fullText = ''
+function parseSSEFrame(frame: string, onDelta?: (delta: string) => void): ParsedSSEFrame {
+  let content = ''
+  let done = false
   for (const line of frame.split(/\r?\n/)) {
     const trimmed = line.trim()
     if (!trimmed.startsWith('data:')) continue
 
     const data = trimmed.slice(5).trim()
-    if (!data || data === '[DONE]') continue
+    if (!data) continue
+    if (data === '[DONE]') {
+      done = true
+      continue
+    }
 
     try {
       const payload = JSON.parse(data)
       const delta = extractAssistantContent(payload)
       if (delta) {
-        fullText += delta
+        content += delta
         onDelta?.(delta)
       }
     } catch {
       // Ignore malformed stream frames; the backend may also emit event metadata.
     }
   }
-  return fullText
+  return { content, done }
 }
 
 export const userAiAPI = {
@@ -227,8 +256,9 @@ export const userAiAPI = {
     const decoder = new TextDecoder()
     let buffer = ''
     let fullText = ''
+    let sawDone = false
 
-    while (true) {
+    while (!sawDone) {
       const { value, done } = await reader.read()
       if (done) break
 
@@ -236,12 +266,19 @@ export const userAiAPI = {
       const frames = buffer.split(/\r?\n\r?\n/)
       buffer = frames.pop() || ''
       for (const frame of frames) {
-        fullText += parseSSEFrame(frame, options.onDelta)
+        const parsed = parseSSEFrame(frame, options.onDelta)
+        fullText += parsed.content
+        if (parsed.done) {
+          sawDone = true
+          break
+        }
       }
     }
 
-    if (buffer.trim()) {
-      fullText += parseSSEFrame(buffer, options.onDelta)
+    if (!sawDone && buffer.trim()) {
+      const parsed = parseSSEFrame(buffer, options.onDelta)
+      fullText += parsed.content
+      sawDone = parsed.done
     }
 
     return fullText
