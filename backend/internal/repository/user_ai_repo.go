@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -186,6 +187,80 @@ func (r *userAIRepository) UpdateChatConversationAfterMessage(ctx context.Contex
 	return nil
 }
 
+func (r *userAIRepository) CreateImageGenerationHistory(ctx context.Context, input service.ImageGenerationHistoryCreateInput) (*service.ImageGenerationHistory, error) {
+	imagesJSON, err := json.Marshal(input.Images)
+	if err != nil {
+		return nil, fmt.Errorf("marshal image generation results: %w", err)
+	}
+
+	var item service.ImageGenerationHistory
+	var groupID sql.NullInt64
+	var imagesRaw []byte
+	if err := scanSingleRow(ctx, r.sql, `
+		INSERT INTO image_generation_history (user_id, group_id, prompt, model, size, n, images)
+		VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+		RETURNING id, user_id, group_id, prompt, model, size, n, images, created_at
+	`, []any{input.UserID, input.GroupID, input.Prompt, input.Model, input.Size, input.N, string(imagesJSON)},
+		&item.ID,
+		&item.UserID,
+		&groupID,
+		&item.Prompt,
+		&item.Model,
+		&item.Size,
+		&item.N,
+		&imagesRaw,
+		&item.CreatedAt,
+	); err != nil {
+		return nil, err
+	}
+	if groupID.Valid {
+		item.GroupID = &groupID.Int64
+	}
+	item.Images = decodeImageGenerationImages(imagesRaw)
+	return &item, nil
+}
+
+func (r *userAIRepository) ListImageGenerationHistory(ctx context.Context, userID int64, params pagination.PaginationParams) (result []service.ImageGenerationHistory, paginationResult *pagination.PaginationResult, err error) {
+	var total int64
+	if err := scanSingleRow(ctx, r.sql, `
+		SELECT COUNT(*)
+		FROM image_generation_history
+		WHERE user_id = $1
+	`, []any{userID}, &total); err != nil {
+		return nil, nil, err
+	}
+
+	rows, err := r.sql.QueryContext(ctx, `
+		SELECT id, user_id, group_id, prompt, model, size, n, images, created_at
+		FROM image_generation_history
+		WHERE user_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2 OFFSET $3
+	`, userID, params.Limit(), params.Offset())
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = closeErr
+		}
+	}()
+
+	items := make([]service.ImageGenerationHistory, 0, params.Limit())
+	for rows.Next() {
+		item, scanErr := scanImageGenerationHistory(rows)
+		if scanErr != nil {
+			return nil, nil, scanErr
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+
+	return items, paginationResultFromTotal(total, params), nil
+}
+
 func (r *userAIRepository) listMessages(ctx context.Context, userID, conversationID int64, limit int) (result []service.ChatMessage, err error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -266,4 +341,42 @@ func scanChatMessage(scanner chatConversationScanner) (service.ChatMessage, erro
 		return service.ChatMessage{}, fmt.Errorf("scan chat message: %w", err)
 	}
 	return message, nil
+}
+
+func scanImageGenerationHistory(scanner chatConversationScanner) (service.ImageGenerationHistory, error) {
+	var item service.ImageGenerationHistory
+	var groupID sql.NullInt64
+	var imagesRaw []byte
+	if err := scanner.Scan(
+		&item.ID,
+		&item.UserID,
+		&groupID,
+		&item.Prompt,
+		&item.Model,
+		&item.Size,
+		&item.N,
+		&imagesRaw,
+		&item.CreatedAt,
+	); err != nil {
+		return service.ImageGenerationHistory{}, fmt.Errorf("scan image generation history: %w", err)
+	}
+	if groupID.Valid {
+		item.GroupID = &groupID.Int64
+	}
+	item.Images = decodeImageGenerationImages(imagesRaw)
+	return item, nil
+}
+
+func decodeImageGenerationImages(raw []byte) []string {
+	if len(raw) == 0 {
+		return []string{}
+	}
+	var images []string
+	if err := json.Unmarshal(raw, &images); err != nil {
+		return []string{}
+	}
+	if images == nil {
+		return []string{}
+	}
+	return images
 }

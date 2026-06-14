@@ -45,6 +45,14 @@ func (s *userAIRepoStub) UpdateChatConversationAfterMessage(_ context.Context, _
 	return nil
 }
 
+func (s *userAIRepoStub) CreateImageGenerationHistory(context.Context, ImageGenerationHistoryCreateInput) (*ImageGenerationHistory, error) {
+	panic("unexpected CreateImageGenerationHistory call")
+}
+
+func (s *userAIRepoStub) ListImageGenerationHistory(context.Context, int64, pagination.PaginationParams) ([]ImageGenerationHistory, *pagination.PaginationResult, error) {
+	panic("unexpected ListImageGenerationHistory call")
+}
+
 func TestUserAIServiceSaveChatTurnPreservesMultimodalUserContent(t *testing.T) {
 	repo := &userAIRepoStub{}
 	svc := NewUserAIService(repo, nil, nil)

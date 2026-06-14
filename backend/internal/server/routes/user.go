@@ -38,6 +38,8 @@ func RegisterUserRoutes(
 			user.GET("/api-keys/:id/usage/daily", h.Usage.GetMyAPIKeyDailyUsage)
 			user.GET("/platform-quotas", h.User.GetMyPlatformQuotas)
 			user.GET("/ai/models", h.UserAI.Models)
+			user.GET("/images/models", h.UserAI.ImageModels)
+			user.GET("/image/history", h.UserAI.ListImageHistory)
 
 			files := user.Group("/files")
 			{
@@ -65,6 +67,16 @@ func RegisterUserRoutes(
 				gin.HandlerFunc(apiKeyAuth),
 				requireGroupAnthropic,
 				h.UserAI.ChatCompletions,
+			)
+			user.POST("/images/generations",
+				bodyLimit,
+				clientRequestID,
+				opsErrorLogger,
+				endpointNorm,
+				h.UserAI.PrepareImageGenerationsProxy,
+				gin.HandlerFunc(apiKeyAuth),
+				requireGroupAnthropic,
+				h.UserAI.ImageGenerations,
 			)
 
 			// 通知邮箱管理

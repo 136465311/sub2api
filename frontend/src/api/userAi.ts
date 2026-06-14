@@ -15,6 +15,39 @@ export interface AIModelsResult {
   default_model?: string
 }
 
+export interface GenerateImagePayload {
+  prompt: string
+  model: string
+  size: '1:1' | '16:9' | '9:16'
+  n: number
+  group_id?: number | null
+}
+
+export interface AIImageGenerationImage {
+  url?: string
+  b64_json?: string
+  revised_prompt?: string
+}
+
+export interface AIImageGenerationResponse {
+  created: number
+  data: AIImageGenerationImage[]
+  size?: string
+  model?: string
+}
+
+export interface AIImageHistoryItem {
+  id: number
+  user_id: number
+  group_id: number | null
+  prompt: string
+  model: string
+  size: string
+  n: number
+  images: string[]
+  created_at: string
+}
+
 export interface AIChatMessage {
   id: number
   conversation_id: number
@@ -125,6 +158,46 @@ function normalizeConversation(raw: RawRecord): AIConversation {
   }
 }
 
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item ?? '')).filter((item) => item.trim()) : []
+}
+
+function normalizeImageHistory(raw: RawRecord): AIImageHistoryItem {
+  return {
+    id: toNumber(raw.id ?? raw.ID),
+    user_id: toNumber(raw.user_id ?? raw.UserID),
+    group_id: toNullableNumber(raw.group_id ?? raw.GroupID),
+    prompt: String(raw.prompt ?? raw.Prompt ?? ''),
+    model: String(raw.model ?? raw.Model ?? ''),
+    size: String(raw.size ?? raw.Size ?? ''),
+    n: toNumber(raw.n ?? raw.N, 1),
+    images: toStringArray(raw.images ?? raw.Images),
+    created_at: String(raw.created_at ?? raw.CreatedAt ?? '')
+  }
+}
+
+function normalizeImageGenerationImage(raw: RawRecord): AIImageGenerationImage {
+  const url = typeof raw.url === 'string' ? raw.url : ''
+  const b64 = typeof raw.b64_json === 'string' ? raw.b64_json : ''
+  return {
+    ...(url ? { url } : {}),
+    ...(b64 ? { b64_json: b64 } : {}),
+    ...(typeof raw.revised_prompt === 'string' && raw.revised_prompt
+      ? { revised_prompt: raw.revised_prompt }
+      : {})
+  }
+}
+
+function normalizeImageGenerationResponse(raw: RawRecord): AIImageGenerationResponse {
+  const data = Array.isArray(raw?.data) ? raw.data.map((item) => normalizeImageGenerationImage(item as RawRecord)) : []
+  return {
+    created: toNumber(raw?.created ?? raw?.created_at),
+    data,
+    ...(typeof raw?.size === 'string' && raw.size ? { size: raw.size } : {}),
+    ...(typeof raw?.model === 'string' && raw.model ? { model: raw.model } : {})
+  }
+}
+
 function authHeaders(): HeadersInit {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -214,6 +287,10 @@ export const userAiAPI = {
     return apiClient.get('/user/ai/models').then((res) => res.data)
   },
 
+  async getImageModels(): Promise<AIModelsResult> {
+    return apiClient.get('/user/images/models').then((res) => res.data)
+  },
+
   async listConversations(page = 1, pageSize = 50): Promise<PaginatedResponse<AIConversation>> {
     const res = await apiClient.get('/user/chat/conversations', {
       params: { page, page_size: pageSize }
@@ -244,6 +321,24 @@ export const userAiAPI = {
       timeout: 60000
     })
     return res.data as UploadImageResult
+  },
+
+  async generateImages(payload: GenerateImagePayload): Promise<AIImageGenerationResponse> {
+    const res = await apiClient.post('/user/images/generations', payload, {
+      timeout: 180000
+    })
+    return normalizeImageGenerationResponse((res.data ?? {}) as RawRecord)
+  },
+
+  async listImageHistory(page = 1, pageSize = 20): Promise<PaginatedResponse<AIImageHistoryItem>> {
+    const res = await apiClient.get('/user/image/history', {
+      params: { page, page_size: pageSize }
+    })
+    const data = res.data as PaginatedResponse<RawRecord>
+    return {
+      ...data,
+      items: Array.isArray(data.items) ? data.items.map((item) => normalizeImageHistory(item)) : []
+    }
   },
 
   async streamChatCompletions(
