@@ -11,6 +11,7 @@ import (
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/apikey"
 	"github.com/Wei-Shaw/sub2api/ent/group"
+	"github.com/Wei-Shaw/sub2api/ent/predicate"
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -55,20 +56,24 @@ func (r *apiKeyRepository) activeQuery() *dbent.APIKeyQuery {
 	return r.client.APIKey.Query().Where(apikey.DeletedAtIsNil())
 }
 
-func entSourceEQ(source string) func(*entsql.Selector) {
+func apiKeySourceOrDefault(source string) string {
 	if strings.TrimSpace(source) == "" {
-		source = service.APIKeySourceUser
+		return service.APIKeySourceUser
 	}
-	return func(s *entsql.Selector) {
-		s.Where(entsql.ExprP("COALESCE(source, 'user') = ?", source))
-	}
+	return strings.TrimSpace(source)
+}
+
+func apiKeySourceEQ(source string) predicate.APIKey {
+	return apikey.SourceEQ(apiKeySourceOrDefault(source))
 }
 
 func (r *apiKeyRepository) Create(ctx context.Context, key *service.APIKey) error {
+	source := apiKeySourceOrDefault(key.Source)
 	builder := r.client.APIKey.Create().
 		SetUserID(key.UserID).
 		SetKey(key.Key).
 		SetName(key.Name).
+		SetSource(source).
 		SetStatus(key.Status).
 		SetNillableGroupID(key.GroupID).
 		SetNillableLastUsedAt(key.LastUsedAt).
@@ -92,21 +97,7 @@ func (r *apiKeyRepository) Create(ctx context.Context, key *service.APIKey) erro
 		key.LastUsedAt = created.LastUsedAt
 		key.CreatedAt = created.CreatedAt
 		key.UpdatedAt = created.UpdatedAt
-		source := strings.TrimSpace(key.Source)
-		if source == "" {
-			source = service.APIKeySourceUser
-		}
-		key.Source = source
-		if source != service.APIKeySourceUser {
-			if _, sourceErr := r.sql.ExecContext(ctx, `
-				UPDATE api_keys
-				SET source = $1
-				WHERE id = $2 AND deleted_at IS NULL
-			`, source, created.ID); sourceErr != nil {
-				return sourceErr
-			}
-			key.Source = source
-		}
+		key.Source = created.Source
 	}
 	return translatePersistenceError(err, nil, service.ErrAPIKeyExists)
 }
@@ -133,7 +124,7 @@ func (r *apiKeyRepository) GetByID(ctx context.Context, id int64) (*service.APIK
 //   - 适用于删除等只需 key 与用户 ID 的场景
 func (r *apiKeyRepository) GetKeyAndOwnerID(ctx context.Context, id int64) (string, int64, error) {
 	m, err := r.activeQuery().
-		Where(apikey.IDEQ(id), entSourceEQ(service.APIKeySourceUser)).
+		Where(apikey.IDEQ(id), apiKeySourceEQ(service.APIKeySourceUser)).
 		Select(apikey.FieldKey, apikey.FieldUserID).
 		Only(ctx)
 	if err != nil {
@@ -455,7 +446,7 @@ func (r *apiKeyRepository) deleteWithAudit(ctx context.Context, exec *dbent.Clie
 }
 
 func (r *apiKeyRepository) ListByUserID(ctx context.Context, userID int64, params pagination.PaginationParams, filters service.APIKeyListFilters) ([]service.APIKey, *pagination.PaginationResult, error) {
-	q := r.activeQuery().Where(apikey.UserIDEQ(userID), entSourceEQ(service.APIKeySourceUser))
+	q := r.activeQuery().Where(apikey.UserIDEQ(userID), apiKeySourceEQ(service.APIKeySourceUser))
 
 	// Apply filters
 	if filters.Search != "" {
@@ -507,7 +498,7 @@ func (r *apiKeyRepository) VerifyOwnership(ctx context.Context, userID int64, ap
 	}
 
 	ids, err := r.client.APIKey.Query().
-		Where(apikey.UserIDEQ(userID), apikey.IDIn(apiKeyIDs...), entSourceEQ(service.APIKeySourceUser), apikey.DeletedAtIsNil()).
+		Where(apikey.UserIDEQ(userID), apikey.IDIn(apiKeyIDs...), apiKeySourceEQ(service.APIKeySourceUser), apikey.DeletedAtIsNil()).
 		IDs(ctx)
 	if err != nil {
 		return nil, err
@@ -516,7 +507,7 @@ func (r *apiKeyRepository) VerifyOwnership(ctx context.Context, userID int64, ap
 }
 
 func (r *apiKeyRepository) CountByUserID(ctx context.Context, userID int64) (int64, error) {
-	count, err := r.activeQuery().Where(apikey.UserIDEQ(userID), entSourceEQ(service.APIKeySourceUser)).Count(ctx)
+	count, err := r.activeQuery().Where(apikey.UserIDEQ(userID), apiKeySourceEQ(service.APIKeySourceUser)).Count(ctx)
 	return int64(count), err
 }
 
@@ -584,7 +575,7 @@ func apiKeyListOrder(params pagination.PaginationParams) []func(*entsql.Selector
 func (r *apiKeyRepository) SearchAPIKeys(ctx context.Context, userID int64, keyword string, limit int) ([]service.APIKey, error) {
 	q := r.activeQuery()
 	if userID > 0 {
-		q = q.Where(apikey.UserIDEQ(userID), entSourceEQ(service.APIKeySourceUser))
+		q = q.Where(apikey.UserIDEQ(userID), apiKeySourceEQ(service.APIKeySourceUser))
 	}
 
 	if keyword != "" {
@@ -630,7 +621,7 @@ func (r *apiKeyRepository) CountByGroupID(ctx context.Context, groupID int64) (i
 
 func (r *apiKeyRepository) ListKeysByUserID(ctx context.Context, userID int64) ([]string, error) {
 	keys, err := r.activeQuery().
-		Where(apikey.UserIDEQ(userID), entSourceEQ(service.APIKeySourceUser)).
+		Where(apikey.UserIDEQ(userID), apiKeySourceEQ(service.APIKeySourceUser)).
 		Select(apikey.FieldKey).
 		Strings(ctx)
 	if err != nil {
@@ -773,6 +764,7 @@ func apiKeyEntityToService(m *dbent.APIKey) *service.APIKey {
 		UserID:        m.UserID,
 		Key:           m.Key,
 		Name:          m.Name,
+		Source:        apiKeySourceOrDefault(m.Source),
 		Status:        m.Status,
 		IPWhitelist:   m.IPWhitelist,
 		IPBlacklist:   m.IPBlacklist,

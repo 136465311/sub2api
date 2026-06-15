@@ -8,6 +8,7 @@ import (
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/ent/enttest"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 
@@ -140,6 +141,50 @@ func TestAPIKeyRepository_VerifyOwnershipHidesInternalKey(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, []int64{visible.ID}, ids)
+}
+
+func TestAPIKeyRepository_ListByUserIDHidesInternalKeysAndAllowsEmptyList(t *testing.T) {
+	repo, client := newAPIKeyRepoSQLite(t)
+	ctx := context.Background()
+	user := mustCreateAPIKeyRepoUser(t, ctx, client, "source-list@test.com")
+
+	keys, page, err := repo.ListByUserID(ctx, user.ID, pagination.PaginationParams{
+		Page:     1,
+		PageSize: 20,
+		SortBy:   "created_at",
+	}, service.APIKeyListFilters{})
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	require.Equal(t, int64(0), page.Total)
+
+	visible := &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-list-source-visible",
+		Name:   "Visible",
+		Status: service.StatusActive,
+	}
+	require.NoError(t, repo.Create(ctx, visible))
+
+	internal := &service.APIKey{
+		UserID: user.ID,
+		Key:    "sk-list-source-internal",
+		Name:   "Internal",
+		Source: service.APIKeySourceUserAI,
+		Status: service.StatusActive,
+	}
+	require.NoError(t, repo.Create(ctx, internal))
+
+	keys, page, err = repo.ListByUserID(ctx, user.ID, pagination.PaginationParams{
+		Page:      1,
+		PageSize:  20,
+		SortBy:    "created_at",
+		SortOrder: "desc",
+	}, service.APIKeyListFilters{})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), page.Total)
+	require.Len(t, keys, 1)
+	require.Equal(t, visible.ID, keys[0].ID)
+	require.Equal(t, service.APIKeySourceUser, keys[0].Source)
 }
 
 func TestAPIKeyRepository_UpdateLastUsedDBError(t *testing.T) {

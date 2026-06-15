@@ -108,6 +108,7 @@ type APIKeyMutation struct {
 	deleted_at         *time.Time
 	key                *string
 	name               *string
+	source             *string
 	status             *string
 	last_used_at       *time.Time
 	ip_whitelist       *[]string
@@ -472,6 +473,42 @@ func (m *APIKeyMutation) OldName(ctx context.Context) (v string, err error) {
 // ResetName resets all changes to the "name" field.
 func (m *APIKeyMutation) ResetName() {
 	m.name = nil
+}
+
+// SetSource sets the "source" field.
+func (m *APIKeyMutation) SetSource(s string) {
+	m.source = &s
+}
+
+// Source returns the value of the "source" field in the mutation.
+func (m *APIKeyMutation) Source() (r string, exists bool) {
+	v := m.source
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSource returns the old "source" field's value of the APIKey entity.
+// If the APIKey object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *APIKeyMutation) OldSource(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSource is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSource requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSource: %w", err)
+	}
+	return oldValue.Source, nil
+}
+
+// ResetSource resets all changes to the "source" field.
+func (m *APIKeyMutation) ResetSource() {
+	m.source = nil
 }
 
 // SetGroupID sets the "group_id" field.
@@ -1524,7 +1561,7 @@ func (m *APIKeyMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *APIKeyMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 24)
 	if m.created_at != nil {
 		fields = append(fields, apikey.FieldCreatedAt)
 	}
@@ -1542,6 +1579,9 @@ func (m *APIKeyMutation) Fields() []string {
 	}
 	if m.name != nil {
 		fields = append(fields, apikey.FieldName)
+	}
+	if m.source != nil {
+		fields = append(fields, apikey.FieldSource)
 	}
 	if m.group != nil {
 		fields = append(fields, apikey.FieldGroupID)
@@ -1614,6 +1654,8 @@ func (m *APIKeyMutation) Field(name string) (ent.Value, bool) {
 		return m.Key()
 	case apikey.FieldName:
 		return m.Name()
+	case apikey.FieldSource:
+		return m.Source()
 	case apikey.FieldGroupID:
 		return m.GroupID()
 	case apikey.FieldStatus:
@@ -1669,6 +1711,8 @@ func (m *APIKeyMutation) OldField(ctx context.Context, name string) (ent.Value, 
 		return m.OldKey(ctx)
 	case apikey.FieldName:
 		return m.OldName(ctx)
+	case apikey.FieldSource:
+		return m.OldSource(ctx)
 	case apikey.FieldGroupID:
 		return m.OldGroupID(ctx)
 	case apikey.FieldStatus:
@@ -1753,6 +1797,13 @@ func (m *APIKeyMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetName(v)
+		return nil
+	case apikey.FieldSource:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSource(v)
 		return nil
 	case apikey.FieldGroupID:
 		v, ok := value.(int64)
@@ -2095,6 +2146,9 @@ func (m *APIKeyMutation) ResetField(name string) error {
 		return nil
 	case apikey.FieldName:
 		m.ResetName()
+		return nil
+	case apikey.FieldSource:
+		m.ResetSource()
 		return nil
 	case apikey.FieldGroupID:
 		m.ResetGroupID()

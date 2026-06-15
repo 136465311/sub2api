@@ -41,6 +41,10 @@ func (APIKey) Fields() []ent.Field {
 		field.String("name").
 			MaxLen(100).
 			NotEmpty(),
+		field.String("source").
+			MaxLen(32).
+			Default("user").
+			Comment("Key source: user-created keys are visible; internal keys are hidden from user key management"),
 		field.Int64("group_id").
 			Optional().
 			Nillable(),
