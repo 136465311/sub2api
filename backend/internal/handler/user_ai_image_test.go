@@ -80,6 +80,38 @@ func TestUserAIImageAssistantContent(t *testing.T) {
 	}
 }
 
+func TestParseUserAIGroupRequest(t *testing.T) {
+	tests := []struct {
+		name      string
+		groupID   any
+		groupName any
+		group     any
+		wantID    int64
+		wantName  string
+	}{
+		{name: "numeric group_id", groupID: float64(12), wantID: 12},
+		{name: "string group_id", groupID: "12", wantID: 12},
+		{name: "group_name", groupName: " chatgpt-plus ", wantName: "chatgpt-plus"},
+		{name: "numeric group alias", group: "12", wantID: 12},
+		{name: "name group alias", group: " chatgpt-plus ", wantName: "chatgpt-plus"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseUserAIGroupRequest(tt.groupID, tt.groupName, tt.group)
+			if tt.wantID > 0 {
+				if got.GroupID == nil || *got.GroupID != tt.wantID {
+					t.Fatalf("expected group id %d, got %#v", tt.wantID, got.GroupID)
+				}
+				return
+			}
+			if got.GroupName != tt.wantName {
+				t.Fatalf("expected group name %q, got %q", tt.wantName, got.GroupName)
+			}
+		})
+	}
+}
+
 func TestIsBlockedUserAIImageHost(t *testing.T) {
 	if !isBlockedUserAIImageHost("127.0.0.1") {
 		t.Fatal("expected localhost ip to be blocked")

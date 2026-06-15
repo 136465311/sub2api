@@ -53,6 +53,11 @@ type AIModelsResult struct {
 	DefaultModel   string         `json:"default_model,omitempty"`
 }
 
+type AIGroupRequest struct {
+	GroupID   *int64
+	GroupName string
+}
+
 type ImageGenerationHistory struct {
 	ID        int64     `json:"id"`
 	UserID    int64     `json:"user_id"`
@@ -187,16 +192,32 @@ func (s *UserAIService) ListImageModels(ctx context.Context, userID int64) (*AIM
 }
 
 func (s *UserAIService) ResolveGroup(ctx context.Context, userID int64, requestedGroupID *int64) (*Group, error) {
+	return s.ResolveRequestedGroup(ctx, userID, AIGroupRequest{GroupID: requestedGroupID})
+}
+
+func (s *UserAIService) ResolveRequestedGroup(ctx context.Context, userID int64, requested AIGroupRequest) (*Group, error) {
 	groups, err := s.apiKeyService.GetAvailableGroups(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
+	return resolveAIGroupFromAvailableGroups(groups, requested)
+}
+
+func resolveAIGroupFromAvailableGroups(groups []Group, requested AIGroupRequest) (*Group, error) {
 	if len(groups) == 0 {
 		return nil, ErrAIGroupNotAvailable
 	}
-	if requestedGroupID != nil {
+	if requested.GroupID != nil {
 		for i := range groups {
-			if groups[i].ID == *requestedGroupID {
+			if groups[i].ID == *requested.GroupID {
+				return &groups[i], nil
+			}
+		}
+		return nil, ErrAIGroupNotAvailable
+	}
+	if groupName := strings.TrimSpace(requested.GroupName); groupName != "" {
+		for i := range groups {
+			if strings.EqualFold(strings.TrimSpace(groups[i].Name), groupName) {
 				return &groups[i], nil
 			}
 		}
@@ -206,20 +227,11 @@ func (s *UserAIService) ResolveGroup(ctx context.Context, userID int64, requeste
 }
 
 func (s *UserAIService) ResolveImageGroup(ctx context.Context, userID int64, requestedGroupID *int64) (*Group, error) {
-	groups, err := s.apiKeyService.GetAvailableGroups(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	for i := range groups {
-		group := groups[i]
-		if requestedGroupID != nil && group.ID != *requestedGroupID {
-			continue
-		}
-		if strings.TrimSpace(group.Platform) == PlatformOpenAI && GroupAllowsImageGeneration(&group) {
-			return &group, nil
-		}
-	}
-	return nil, ErrAIGroupNotAvailable
+	return s.ResolveRequestedGroup(ctx, userID, AIGroupRequest{GroupID: requestedGroupID})
+}
+
+func (s *UserAIService) ResolveImageRequestedGroup(ctx context.Context, userID int64, requested AIGroupRequest) (*Group, error) {
+	return s.ResolveRequestedGroup(ctx, userID, requested)
 }
 
 func (s *UserAIService) GetOrCreateInternalKey(ctx context.Context, userID int64, groupID *int64) (*APIKey, error) {

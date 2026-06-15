@@ -36,8 +36,10 @@ type userAIImageGenerationRequest struct {
 	Model          string `json:"model"`
 	Size           string `json:"size"`
 	N              int    `json:"n"`
-	GroupID        *int64 `json:"group_id"`
-	ConversationID int64  `json:"conversation_id"`
+	GroupID        any    `json:"group_id"`
+	GroupName      any    `json:"group_name"`
+	Group          any    `json:"group"`
+	ConversationID any    `json:"conversation_id"`
 }
 
 func (h *UserAIHandler) ImageModels(c *gin.Context) {
@@ -102,7 +104,8 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 		return
 	}
 
-	group, err := h.userAIService.ResolveImageGroup(c.Request.Context(), subject.UserID, req.GroupID)
+	groupRequest := parseUserAIGroupRequest(req.GroupID, req.GroupName, req.Group)
+	group, err := h.userAIService.ResolveImageRequestedGroup(c.Request.Context(), subject.UserID, groupRequest)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		c.Abort()
@@ -136,7 +139,7 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 	c.Set(userAIImageModelContextKey, req.Model)
 	c.Set(userAIImageSizeContextKey, req.Size)
 	c.Set(userAIImageCountContextKey, req.N)
-	c.Set(userAIConversationIDContextKey, req.ConversationID)
+	c.Set(userAIConversationIDContextKey, parseOptionalInt64Value(req.ConversationID))
 	c.Request.URL.Path = "/v1/images/generations"
 	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
 	c.Request.Header.Set("Content-Type", "application/json")
@@ -323,6 +326,22 @@ func normalizeUserAIImageSize(size string) string {
 	default:
 		return strings.TrimSpace(size)
 	}
+}
+
+func parseUserAIGroupRequest(groupIDValue, groupNameValue, groupValue any) service.AIGroupRequest {
+	request := service.AIGroupRequest{
+		GroupID:   parseOptionalInt64(groupIDValue),
+		GroupName: strings.TrimSpace(stringFromAny(groupNameValue)),
+	}
+	if request.GroupID != nil || request.GroupName != "" {
+		return request
+	}
+	if groupID := parseOptionalInt64(groupValue); groupID != nil {
+		request.GroupID = groupID
+		return request
+	}
+	request.GroupName = strings.TrimSpace(stringFromAny(groupValue))
+	return request
 }
 
 func extractUserAIImageResults(body []byte) []string {

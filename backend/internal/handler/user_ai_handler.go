@@ -167,8 +167,8 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	groupID := parseOptionalInt64(payload["group_id"])
-	group, err := h.userAIService.ResolveGroup(c.Request.Context(), subject.UserID, groupID)
+	groupRequest := parseUserAIGroupRequest(payload["group_id"], payload["group_name"], payload["group"])
+	group, err := h.userAIService.ResolveRequestedGroup(c.Request.Context(), subject.UserID, groupRequest)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		c.Abort()
@@ -195,6 +195,8 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 
 	delete(payload, "conversation_id")
 	delete(payload, "group_id")
+	delete(payload, "group_name")
+	delete(payload, "group")
 	rewriteUserAIRelativeImageURLs(payload, userAIRequestBaseURL(c))
 	cleanBody, err := json.Marshal(payload)
 	if err != nil {

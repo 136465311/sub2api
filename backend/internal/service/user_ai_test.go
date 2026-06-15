@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
@@ -77,6 +78,49 @@ func TestChatMessageContentSummaryUsesImageFallback(t *testing.T) {
 	title, hasImage := chatMessageContentSummary(`[{"type":"image_url","image_url":{"url":"/uploads/user_ai/7/image.png"}}]`)
 	if title != "" || !hasImage {
 		t.Fatalf("expected empty title and image flag, got title=%q hasImage=%v", title, hasImage)
+	}
+}
+
+func TestResolveAIGroupFromAvailableGroupsMatchesByIDWithoutImageFlag(t *testing.T) {
+	groupID := int64(12)
+	groups := []Group{{
+		ID:                   groupID,
+		Name:                 "chatgpt-plus",
+		Platform:             PlatformOpenAI,
+		AllowImageGeneration: false,
+	}}
+
+	got, err := resolveAIGroupFromAvailableGroups(groups, AIGroupRequest{GroupID: &groupID})
+	if err != nil {
+		t.Fatalf("resolveAIGroupFromAvailableGroups returned error: %v", err)
+	}
+	if got == nil || got.ID != groupID {
+		t.Fatalf("expected group %d, got %#v", groupID, got)
+	}
+}
+
+func TestResolveAIGroupFromAvailableGroupsMatchesByName(t *testing.T) {
+	groups := []Group{
+		{ID: 7, Name: "default", Platform: PlatformOpenAI},
+		{ID: 12, Name: "chatgpt-plus", Platform: PlatformOpenAI},
+	}
+
+	got, err := resolveAIGroupFromAvailableGroups(groups, AIGroupRequest{GroupName: " CHATGPT-PLUS "})
+	if err != nil {
+		t.Fatalf("resolveAIGroupFromAvailableGroups returned error: %v", err)
+	}
+	if got == nil || got.ID != 12 {
+		t.Fatalf("expected chatgpt-plus group, got %#v", got)
+	}
+}
+
+func TestResolveAIGroupFromAvailableGroupsRejectsUnavailableGroup(t *testing.T) {
+	groupID := int64(99)
+	groups := []Group{{ID: 12, Name: "chatgpt-plus", Platform: PlatformOpenAI}}
+
+	_, err := resolveAIGroupFromAvailableGroups(groups, AIGroupRequest{GroupID: &groupID})
+	if !errors.Is(err, ErrAIGroupNotAvailable) {
+		t.Fatalf("expected ErrAIGroupNotAvailable, got %v", err)
 	}
 }
 
