@@ -128,6 +128,7 @@ type ParsedSSEFrame = {
 }
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '')
+export const USER_IMAGE_EDITS_ENDPOINT = '/user/images/edits'
 
 function toNumber(value: unknown, fallback = 0): number {
   const n = Number(value)
@@ -385,7 +386,7 @@ export const userAiAPI = {
     payload: EditImagePayload,
     options: GenerateImageOptions = {}
   ): Promise<AIImageGenerationResponse> {
-    const res = await apiClient.post('/user/images/edits', payload, {
+    const res = await apiClient.post(USER_IMAGE_EDITS_ENDPOINT, payload, {
       timeout: 180000,
       signal: options.signal
     })
