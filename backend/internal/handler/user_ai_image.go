@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -57,6 +60,12 @@ type userAIImageEditRequest struct {
 }
 
 var userAIEditImageURLPattern = regexp.MustCompile(`^/uploads/user_ai/(\d+)/(?:generated/)?[A-Za-z0-9._-]+\.(?i:jpg|jpeg|png|webp|gif)$`)
+
+type userAIEditImageUpload struct {
+	FileName    string
+	ContentType string
+	Data        []byte
+}
 
 func (h *UserAIHandler) ImageModels(c *gin.Context) {
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
@@ -221,9 +230,19 @@ func (h *UserAIHandler) PrepareImageEditsProxy(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	baseURL := userAIRequestBaseURL(c)
-	if strings.TrimSpace(baseURL) == "" {
-		response.BadRequest(c, "Unable to resolve site URL")
+	cleanBody, contentType, err := h.buildUserAIImageEditMultipartBody(req, relativeImageURLs)
+	if err != nil {
+		if errors.Is(err, errUserAIUploadTooLarge) {
+			response.Error(c, http.StatusRequestEntityTooLarge, "Image must be 20MB or smaller")
+			c.Abort()
+			return
+		}
+		if errors.Is(err, errUserAIUploadType) {
+			response.BadRequest(c, "Only JPEG, PNG, WebP, and GIF images are allowed")
+			c.Abort()
+			return
+		}
+		response.BadRequest(c, err.Error())
 		c.Abort()
 		return
 	}
@@ -244,28 +263,6 @@ func (h *UserAIHandler) PrepareImageEditsProxy(c *gin.Context) {
 		return
 	}
 
-	images := make([]map[string]string, 0, len(relativeImageURLs))
-	baseURL = strings.TrimRight(baseURL, "/")
-	for _, imageURL := range relativeImageURLs {
-		images = append(images, map[string]string{
-			"image_url": baseURL + imageURL,
-		})
-	}
-	payload := map[string]any{
-		"prompt":          req.Prompt,
-		"model":           req.Model,
-		"size":            req.Size,
-		"n":               req.N,
-		"response_format": "url",
-		"images":          images,
-	}
-	cleanBody, err := json.Marshal(payload)
-	if err != nil {
-		response.BadRequest(c, "Invalid request body")
-		c.Abort()
-		return
-	}
-
 	c.Set(userAIGroupIDContextKey, resolvedGroupID)
 	c.Set(userAIImagePromptContextKey, req.Prompt)
 	c.Set(userAIImageModelContextKey, req.Model)
@@ -275,7 +272,7 @@ func (h *UserAIHandler) PrepareImageEditsProxy(c *gin.Context) {
 	c.Set(userAIConversationIDContextKey, parseOptionalInt64Value(req.ConversationID))
 	c.Request.URL.Path = "/v1/images/edits"
 	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
-	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("Content-Type", contentType)
 	c.Request.Header.Del("x-api-key")
 	c.Request.Header.Del("x-goog-api-key")
 	c.Request.Body = io.NopCloser(bytes.NewReader(cleanBody))
@@ -524,6 +521,158 @@ func validateUserAIEditImageURLs(userID int64, imageURLs []string) ([]string, er
 		return nil, fmt.Errorf("image_urls is required")
 	}
 	return result, nil
+}
+
+func (h *UserAIHandler) buildUserAIImageEditMultipartBody(req userAIImageEditRequest, imageURLs []string) ([]byte, string, error) {
+	uploads, err := h.loadUserAIEditImageUploads(imageURLs)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	writeField := func(name string, value string) error {
+		if strings.TrimSpace(value) == "" {
+			return nil
+		}
+		if err := writer.WriteField(name, value); err != nil {
+			return fmt.Errorf("write multipart field %s: %w", name, err)
+		}
+		return nil
+	}
+	if err := writeField("prompt", req.Prompt); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("model", req.Model); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("size", req.Size); err != nil {
+		return nil, "", err
+	}
+	if req.N > 0 {
+		if err := writer.WriteField("n", strconv.Itoa(req.N)); err != nil {
+			return nil, "", fmt.Errorf("write multipart field n: %w", err)
+		}
+	}
+	if err := writer.WriteField("response_format", "url"); err != nil {
+		return nil, "", fmt.Errorf("write multipart field response_format: %w", err)
+	}
+	for _, upload := range uploads {
+		fieldName := "image"
+		if len(uploads) > 1 {
+			fieldName = "image[]"
+		}
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, fieldName, upload.FileName))
+		header.Set("Content-Type", upload.ContentType)
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			return nil, "", fmt.Errorf("create multipart image part: %w", err)
+		}
+		if _, err := part.Write(upload.Data); err != nil {
+			return nil, "", fmt.Errorf("write multipart image part: %w", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("finalize multipart body: %w", err)
+	}
+	return body.Bytes(), writer.FormDataContentType(), nil
+}
+
+func (h *UserAIHandler) loadUserAIEditImageUploads(imageURLs []string) ([]userAIEditImageUpload, error) {
+	if len(imageURLs) == 0 {
+		return nil, fmt.Errorf("image_urls is required")
+	}
+	uploads := make([]userAIEditImageUpload, 0, len(imageURLs))
+	for _, imageURL := range imageURLs {
+		upload, err := h.loadUserAIEditImageUpload(imageURL)
+		if err != nil {
+			return nil, err
+		}
+		uploads = append(uploads, upload)
+	}
+	return uploads, nil
+}
+
+func (h *UserAIHandler) loadUserAIEditImageUpload(imageURL string) (userAIEditImageUpload, error) {
+	localPath, filename, err := h.resolveUserAIEditImagePath(imageURL)
+	if err != nil {
+		return userAIEditImageUpload{}, err
+	}
+	maxSize := h.uploadMaxFileSize
+	if maxSize <= 0 {
+		maxSize = userAIUploadMaxFileSize
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return userAIEditImageUpload{}, fmt.Errorf("uploaded image file not found")
+		}
+		return userAIEditImageUpload{}, fmt.Errorf("uploaded image file is unavailable")
+	}
+	if info.IsDir() {
+		return userAIEditImageUpload{}, fmt.Errorf("uploaded image file not found")
+	}
+	if info.Size() > maxSize {
+		return userAIEditImageUpload{}, errUserAIUploadTooLarge
+	}
+	file, err := os.Open(localPath)
+	if err != nil {
+		return userAIEditImageUpload{}, fmt.Errorf("uploaded image file is unavailable")
+	}
+	defer func() { _ = file.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxSize+1))
+	if err != nil {
+		return userAIEditImageUpload{}, fmt.Errorf("uploaded image file is unavailable")
+	}
+	if len(data) == 0 {
+		return userAIEditImageUpload{}, errUserAIUploadType
+	}
+	if int64(len(data)) > maxSize {
+		return userAIEditImageUpload{}, errUserAIUploadTooLarge
+	}
+	contentType := detectUserAIImageContentType(data)
+	if _, ok := allowedUserAIImageTypes[contentType]; !ok {
+		return userAIEditImageUpload{}, errUserAIUploadType
+	}
+	return userAIEditImageUpload{
+		FileName:    filename,
+		ContentType: contentType,
+		Data:        data,
+	}, nil
+}
+
+func (h *UserAIHandler) resolveUserAIEditImagePath(imageURL string) (string, string, error) {
+	publicRoot := strings.TrimRight(strings.TrimSpace(h.uploadPublicRoot), "/")
+	if publicRoot == "" {
+		publicRoot = userAIUploadPublicRoot
+	}
+	uploadRoot := strings.TrimSpace(h.uploadRoot)
+	if uploadRoot == "" {
+		uploadRoot = userAIUploadRoot
+	}
+	prefix := publicRoot + "/"
+	imageURL = strings.TrimSpace(imageURL)
+	if !strings.HasPrefix(imageURL, prefix) {
+		return "", "", fmt.Errorf("image_urls must reference uploaded site images")
+	}
+	relative := strings.TrimPrefix(imageURL, prefix)
+	localPath := filepath.Join(uploadRoot, filepath.FromSlash(relative))
+
+	rootAbs, err := filepath.Abs(uploadRoot)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve upload root: %w", err)
+	}
+	pathAbs, err := filepath.Abs(localPath)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve uploaded image path: %w", err)
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("image_urls must reference uploaded site images")
+	}
+	return pathAbs, filepath.Base(pathAbs), nil
 }
 
 func userAIImageEditUserContent(prompt string, imageURLs []string) string {

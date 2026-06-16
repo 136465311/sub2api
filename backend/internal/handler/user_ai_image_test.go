@@ -5,8 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +19,6 @@ import (
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 func TestNormalizeUserAIImageSize(t *testing.T) {
@@ -185,7 +188,7 @@ func TestUserAIImageEditUserContent(t *testing.T) {
 	}
 }
 
-func TestPrepareImageEditsProxyRewritesUploadedImageURLs(t *testing.T) {
+func TestPrepareImageEditsProxyBuildsMultipartFromUploadedImageURLs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	groupID := int64(12)
@@ -215,8 +218,19 @@ func TestPrepareImageEditsProxyRewritesUploadedImageURLs(t *testing.T) {
 		nil,
 		&config.Config{},
 	)
+	uploadRoot := t.TempDir()
+	userDir := filepath.Join(uploadRoot, "7")
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatalf("create upload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "source.png"), tinyPNG(), 0644); err != nil {
+		t.Fatalf("write uploaded source image: %v", err)
+	}
 	h := &UserAIHandler{
-		userAIService: service.NewUserAIService(&userAIImageRepoStub{}, apiKeyService, nil),
+		userAIService:     service.NewUserAIService(&userAIImageRepoStub{}, apiKeyService, nil),
+		uploadRoot:        uploadRoot,
+		uploadPublicRoot:  userAIUploadPublicRoot,
+		uploadMaxFileSize: userAIUploadMaxFileSize,
 	}
 
 	body := `{"prompt":"replace background","model":"gpt-image-2","size":"1:1","n":2,"group_id":12,"conversation_id":42,"image_urls":["/uploads/user_ai/7/source.png"]}`
@@ -238,17 +252,53 @@ func TestPrepareImageEditsProxyRewritesUploadedImageURLs(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read rewritten body: %v", err)
 		}
-		if got := gjson.GetBytes(rewritten, "images.0.image_url").String(); got != "https://chat.example/uploads/user_ai/7/source.png" {
-			t.Fatalf("image url not rewritten to absolute site url: %q\nbody=%s", got, rewritten)
+		mediaType, params, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
+		if err != nil {
+			t.Fatalf("parse multipart content-type: %v", err)
 		}
-		if got := gjson.GetBytes(rewritten, "prompt").String(); got != "replace background" {
-			t.Fatalf("prompt = %q", got)
+		if mediaType != "multipart/form-data" {
+			t.Fatalf("content-type = %q, want multipart/form-data", mediaType)
 		}
-		if got := gjson.GetBytes(rewritten, "size").String(); got != "1024x1024" {
-			t.Fatalf("size = %q", got)
+		form, err := multipart.NewReader(bytes.NewReader(rewritten), params["boundary"]).ReadForm(userAIUploadMaxFileSize + (1 << 20))
+		if err != nil {
+			t.Fatalf("read multipart form: %v", err)
 		}
-		if got := gjson.GetBytes(rewritten, "response_format").String(); got != "url" {
-			t.Fatalf("response_format = %q", got)
+		if got := form.Value["prompt"]; len(got) != 1 || got[0] != "replace background" {
+			t.Fatalf("prompt field = %#v", got)
+		}
+		if got := form.Value["model"]; len(got) != 1 || got[0] != "gpt-image-2" {
+			t.Fatalf("model field = %#v", got)
+		}
+		if got := form.Value["size"]; len(got) != 1 || got[0] != "1024x1024" {
+			t.Fatalf("size field = %#v", got)
+		}
+		if got := form.Value["n"]; len(got) != 1 || got[0] != "2" {
+			t.Fatalf("n field = %#v", got)
+		}
+		if got := form.Value["response_format"]; len(got) != 1 || got[0] != "url" {
+			t.Fatalf("response_format field = %#v", got)
+		}
+		files := form.File["image"]
+		if len(files) != 1 {
+			t.Fatalf("expected one image file part, got %#v", form.File)
+		}
+		if files[0].Filename != "source.png" {
+			t.Fatalf("image filename = %q", files[0].Filename)
+		}
+		if got := files[0].Header.Get("Content-Type"); got != "image/png" {
+			t.Fatalf("image content-type = %q", got)
+		}
+		file, err := files[0].Open()
+		if err != nil {
+			t.Fatalf("open image file part: %v", err)
+		}
+		defer func() { _ = file.Close() }()
+		imageData, err := io.ReadAll(file)
+		if err != nil {
+			t.Fatalf("read image file part: %v", err)
+		}
+		if !bytes.Equal(imageData, tinyPNG()) {
+			t.Fatalf("multipart image part did not contain uploaded image bytes")
 		}
 
 		userContent := userContentStringFromContext(c, userAIImageUserContextKey)
