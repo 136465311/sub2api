@@ -78,6 +78,16 @@ func RegisterUserRoutes(
 				requireGroupAnthropic,
 				h.UserAI.ImageGenerations,
 			)
+			user.POST("/images/edits",
+				bodyLimit,
+				clientRequestID,
+				opsErrorLogger,
+				endpointNorm,
+				h.UserAI.PrepareImageEditsProxy,
+				gin.HandlerFunc(apiKeyAuth),
+				requireGroupAnthropic,
+				h.UserAI.ImageGenerations,
+			)
 
 			// 通知邮箱管理
 			notifyEmail := user.Group("/notify-email")

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ const (
 	userAIImageModelContextKey  = "_user_ai_image_model"
 	userAIImageSizeContextKey   = "_user_ai_image_size"
 	userAIImageCountContextKey  = "_user_ai_image_count"
+	userAIImageUserContextKey   = "_user_ai_image_user_content"
 )
 
 type userAIImageGenerationRequest struct {
@@ -41,6 +43,20 @@ type userAIImageGenerationRequest struct {
 	Group          any    `json:"group"`
 	ConversationID any    `json:"conversation_id"`
 }
+
+type userAIImageEditRequest struct {
+	Prompt         string   `json:"prompt"`
+	Model          string   `json:"model"`
+	Size           string   `json:"size"`
+	N              int      `json:"n"`
+	GroupID        any      `json:"group_id"`
+	GroupName      any      `json:"group_name"`
+	Group          any      `json:"group"`
+	ConversationID any      `json:"conversation_id"`
+	ImageURLs      []string `json:"image_urls"`
+}
+
+var userAIEditImageURLPattern = regexp.MustCompile(`^/uploads/user_ai/(\d+)/(?:generated/)?[A-Za-z0-9._-]+\.(?i:jpg|jpeg|png|webp|gif)$`)
 
 func (h *UserAIHandler) ImageModels(c *gin.Context) {
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
@@ -139,8 +155,125 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 	c.Set(userAIImageModelContextKey, req.Model)
 	c.Set(userAIImageSizeContextKey, req.Size)
 	c.Set(userAIImageCountContextKey, req.N)
+	c.Set(userAIImageUserContextKey, req.Prompt)
 	c.Set(userAIConversationIDContextKey, parseOptionalInt64Value(req.ConversationID))
 	c.Request.URL.Path = "/v1/images/generations"
+	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Del("x-api-key")
+	c.Request.Header.Del("x-goog-api-key")
+	c.Request.Body = io.NopCloser(bytes.NewReader(cleanBody))
+	c.Request.ContentLength = int64(len(cleanBody))
+	c.Next()
+}
+
+func (h *UserAIHandler) PrepareImageEditsProxy(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		c.Abort()
+		return
+	}
+
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		response.BadRequest(c, "Failed to read request body")
+		c.Abort()
+		return
+	}
+	if len(bytes.TrimSpace(body)) == 0 || !gjson.ValidBytes(body) {
+		response.BadRequest(c, "Invalid request body")
+		c.Abort()
+		return
+	}
+
+	var req userAIImageEditRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		response.BadRequest(c, "Invalid request body")
+		c.Abort()
+		return
+	}
+	req.Prompt = strings.TrimSpace(req.Prompt)
+	req.Model = strings.TrimSpace(req.Model)
+	req.Size = normalizeUserAIImageSize(req.Size)
+	if req.Prompt == "" {
+		response.ErrorFrom(c, service.ErrAIImageRequired)
+		c.Abort()
+		return
+	}
+	if req.Model == "" {
+		response.ErrorFrom(c, service.ErrAIModelRequired)
+		c.Abort()
+		return
+	}
+	if req.N <= 0 {
+		req.N = 1
+	}
+	if req.N > 4 {
+		response.BadRequest(c, "n must be between 1 and 4")
+		c.Abort()
+		return
+	}
+
+	relativeImageURLs, err := validateUserAIEditImageURLs(subject.UserID, req.ImageURLs)
+	if err != nil {
+		response.BadRequest(c, err.Error())
+		c.Abort()
+		return
+	}
+	baseURL := userAIRequestBaseURL(c)
+	if strings.TrimSpace(baseURL) == "" {
+		response.BadRequest(c, "Unable to resolve site URL")
+		c.Abort()
+		return
+	}
+
+	groupRequest := parseUserAIGroupRequest(req.GroupID, req.GroupName, req.Group)
+	group, err := h.userAIService.ResolveImageRequestedGroup(c.Request.Context(), subject.UserID, groupRequest)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		c.Abort()
+		return
+	}
+	resolvedGroupID := group.ID
+
+	internalKey, err := h.userAIService.GetOrCreateInternalKey(c.Request.Context(), subject.UserID, &resolvedGroupID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		c.Abort()
+		return
+	}
+
+	images := make([]map[string]string, 0, len(relativeImageURLs))
+	baseURL = strings.TrimRight(baseURL, "/")
+	for _, imageURL := range relativeImageURLs {
+		images = append(images, map[string]string{
+			"image_url": baseURL + imageURL,
+		})
+	}
+	payload := map[string]any{
+		"prompt":          req.Prompt,
+		"model":           req.Model,
+		"size":            req.Size,
+		"n":               req.N,
+		"response_format": "url",
+		"images":          images,
+	}
+	cleanBody, err := json.Marshal(payload)
+	if err != nil {
+		response.BadRequest(c, "Invalid request body")
+		c.Abort()
+		return
+	}
+
+	c.Set(userAIGroupIDContextKey, resolvedGroupID)
+	c.Set(userAIImagePromptContextKey, req.Prompt)
+	c.Set(userAIImageModelContextKey, req.Model)
+	c.Set(userAIImageSizeContextKey, req.Size)
+	c.Set(userAIImageCountContextKey, req.N)
+	c.Set(userAIImageUserContextKey, userAIImageEditUserContent(req.Prompt, relativeImageURLs))
+	c.Set(userAIConversationIDContextKey, parseOptionalInt64Value(req.ConversationID))
+	c.Request.URL.Path = "/v1/images/edits"
 	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Request.Header.Del("x-api-key")
@@ -197,6 +330,10 @@ func (h *UserAIHandler) ImageGenerations(c *gin.Context) {
 	n, _ := c.Get(userAIImageCountContextKey)
 	promptText := stringFromAny(prompt)
 	modelText := stringFromAny(model)
+	userContent := promptText
+	if rawUserContent := userContentStringFromContext(c, userAIImageUserContextKey); rawUserContent != "" {
+		userContent = rawUserContent
+	}
 	_, _ = h.userAIService.SaveImageGeneration(c.Request.Context(), service.ImageGenerationHistoryCreateInput{
 		UserID:  subject.UserID,
 		GroupID: optionalPositiveInt64(groupID),
@@ -213,7 +350,7 @@ func (h *UserAIHandler) ImageGenerations(c *gin.Context) {
 			conversationID,
 			optionalPositiveInt64(groupID),
 			modelText,
-			promptText,
+			userContent,
 			userAIImageAssistantContent(images),
 		)
 	}
@@ -342,6 +479,92 @@ func parseUserAIGroupRequest(groupIDValue, groupNameValue, groupValue any) servi
 	}
 	request.GroupName = strings.TrimSpace(stringFromAny(groupValue))
 	return request
+}
+
+func validateUserAIEditImageURLs(userID int64, imageURLs []string) ([]string, error) {
+	if userID <= 0 {
+		return nil, fmt.Errorf("invalid user")
+	}
+	if len(imageURLs) == 0 {
+		return nil, fmt.Errorf("image_urls is required")
+	}
+	if len(imageURLs) > 4 {
+		return nil, fmt.Errorf("image_urls must contain at most 4 images")
+	}
+
+	result := make([]string, 0, len(imageURLs))
+	seen := make(map[string]struct{}, len(imageURLs))
+	for _, raw := range imageURLs {
+		imageURL := strings.TrimSpace(raw)
+		if imageURL == "" {
+			continue
+		}
+		lower := strings.ToLower(imageURL)
+		if strings.HasPrefix(lower, "data:") {
+			return nil, fmt.Errorf("data image URLs are not allowed")
+		}
+		if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(imageURL, "//") {
+			return nil, fmt.Errorf("external image URLs are not allowed")
+		}
+		matches := userAIEditImageURLPattern.FindStringSubmatch(imageURL)
+		if len(matches) != 2 {
+			return nil, fmt.Errorf("image_urls must reference uploaded site images")
+		}
+		ownerID, err := strconv.ParseInt(matches[1], 10, 64)
+		if err != nil || ownerID != userID {
+			return nil, fmt.Errorf("image_urls cannot reference another user")
+		}
+		if _, exists := seen[imageURL]; exists {
+			continue
+		}
+		seen[imageURL] = struct{}{}
+		result = append(result, imageURL)
+	}
+	if len(result) == 0 {
+		return nil, fmt.Errorf("image_urls is required")
+	}
+	return result, nil
+}
+
+func userAIImageEditUserContent(prompt string, imageURLs []string) string {
+	parts := make([]map[string]any, 0, len(imageURLs)+1)
+	if prompt = strings.TrimSpace(prompt); prompt != "" {
+		parts = append(parts, map[string]any{
+			"type": "text",
+			"text": prompt,
+		})
+	}
+	for _, imageURL := range imageURLs {
+		imageURL = strings.TrimSpace(imageURL)
+		if imageURL == "" {
+			continue
+		}
+		parts = append(parts, map[string]any{
+			"type": "image_url",
+			"image_url": map[string]string{
+				"url": imageURL,
+			},
+		})
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	body, err := json.Marshal(parts)
+	if err != nil {
+		return strings.TrimSpace(prompt)
+	}
+	return string(body)
+}
+
+func userContentStringFromContext(c *gin.Context, key string) string {
+	if c == nil {
+		return ""
+	}
+	value, ok := c.Get(key)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(stringFromAny(value))
 }
 
 func extractUserAIImageResults(body []byte) []string {

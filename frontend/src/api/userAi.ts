@@ -18,10 +18,14 @@ export interface AIModelsResult {
 export interface GenerateImagePayload {
   prompt: string
   model: string
-  size?: '1:1' | '16:9' | '9:16'
+  size?: string
   n?: number
   group_id?: number | null
   conversation_id?: number | null
+}
+
+export interface EditImagePayload extends GenerateImagePayload {
+  image_urls: string[]
 }
 
 export interface AIImageGenerationImage {
@@ -371,6 +375,17 @@ export const userAiAPI = {
     options: GenerateImageOptions = {}
   ): Promise<AIImageGenerationResponse> {
     const res = await apiClient.post('/user/images/generations', payload, {
+      timeout: 180000,
+      signal: options.signal
+    })
+    return normalizeImageGenerationResponse((res.data ?? {}) as RawRecord)
+  },
+
+  async editImages(
+    payload: EditImagePayload,
+    options: GenerateImageOptions = {}
+  ): Promise<AIImageGenerationResponse> {
+    const res = await apiClient.post('/user/images/edits', payload, {
       timeout: 180000,
       signal: options.signal
     })

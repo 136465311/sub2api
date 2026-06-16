@@ -274,7 +274,7 @@
                 type="file"
                 accept="image/jpeg,image/png,image/webp,image/gif"
                 multiple
-                :disabled="isSelectedImageModel || sending || imageUploading || selectedImages.length >= maxSelectedImages"
+                :disabled="sending || imageUploading || selectedImages.length >= maxSelectedImages"
                 @change="handleImageSelection"
               />
               <button
@@ -282,7 +282,7 @@
                 class="image-upload-button"
                 :title="t('aiChat.uploadImage')"
                 :aria-label="t('aiChat.uploadImage')"
-                :disabled="isSelectedImageModel || sending || imageUploading || selectedImages.length >= maxSelectedImages"
+                :disabled="sending || imageUploading || selectedImages.length >= maxSelectedImages"
                 @click="openImagePicker"
               >
                 <Icon v-if="imageUploading" name="refresh" size="sm" class="animate-spin" />
@@ -605,13 +605,6 @@ watch(activeConversationId, () => {
   syncActiveConversationSelection()
 })
 
-watch(selectedModel, () => {
-  if (isSelectedImageModel.value && selectedImages.value.length > 0) {
-    selectedImages.value = []
-    resetImageInput()
-  }
-})
-
 onMounted(async () => {
   await Promise.all([loadModels(), loadConversations()])
 })
@@ -715,10 +708,7 @@ async function sendMessage(): Promise<void> {
   const text = draft.value.trim()
   const images = selectedImages.value.map((image) => ({ ...image }))
   if ((!text && images.length === 0) || !selectedModel.value || !selectedGroupId.value || sending.value) return
-  if (isImageModel(selectedModel.value) && images.length > 0) {
-    appStore.showError(t('aiChat.imagePromptOnly'))
-    return
-  }
+  if (isImageModel(selectedModel.value) && !text) return
 
   const titleSeed = text || t('aiChat.imageConversationTitle')
   const conversation = activeConversation.value || (await createConversation(titleSeed))
@@ -743,17 +733,28 @@ async function sendMessage(): Promise<void> {
 
   try {
     if (isImageModel(selectedModel.value)) {
-      const result = await userAiAPI.generateImages(
-        {
-          prompt: text,
-          model: selectedModel.value,
-          group_id: selectedGroupId.value,
-          conversation_id: conversation.id
-        },
-        {
-          signal: abortController.value.signal
-        }
-      )
+      const imagePayload = {
+        prompt: text,
+        model: selectedModel.value,
+        group_id: selectedGroupId.value,
+        conversation_id: conversation.id
+      }
+      const result = images.length > 0
+        ? await userAiAPI.editImages(
+          {
+            ...imagePayload,
+            image_urls: images.map((image) => image.imageUrl)
+          },
+          {
+            signal: abortController.value.signal
+          }
+        )
+        : await userAiAPI.generateImages(
+          imagePayload,
+          {
+            signal: abortController.value.signal
+          }
+        )
       const assistantImageContent = buildAssistantImageContent(result.data)
       if (assistantImageContent.length === 0) {
         throw new Error(t('aiImage.generateFailed'))
@@ -974,7 +975,7 @@ function closeImagePreview(): void {
 }
 
 function openImagePicker(): void {
-  if (isSelectedImageModel.value || sending.value || imageUploading.value || selectedImages.value.length >= maxSelectedImages) return
+  if (sending.value || imageUploading.value || selectedImages.value.length >= maxSelectedImages) return
   imageInputRef.value?.click()
 }
 
