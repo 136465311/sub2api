@@ -452,6 +452,16 @@ func normalizeAPIKeySource(source string) string {
 }
 
 func (s *APIKeyService) GetOrCreateUserAIInternalKey(ctx context.Context, userID int64, groupID *int64) (*APIKey, error) {
+	if groupID != nil {
+		group, err := s.resolveAvailableGroup(ctx, userID, *groupID)
+		if err != nil {
+			return nil, err
+		}
+		if group == nil {
+			return nil, ErrGroupNotAllowed
+		}
+	}
+
 	key, err := s.apiKeyRepo.GetBySourceForUserGroup(ctx, userID, groupID, APIKeySourceUserAI)
 	if err == nil {
 		s.compileAPIKeyIPRules(key)
@@ -461,15 +471,23 @@ func (s *APIKeyService) GetOrCreateUserAIInternalKey(ctx context.Context, userID
 		return nil, fmt.Errorf("get internal user ai key: %w", err)
 	}
 
-	created, createErr := s.Create(ctx, userID, CreateAPIKeyRequest{
-		Name:    "TransitAI Internal",
-		GroupID: groupID,
-		Source:  APIKeySourceUserAI,
-	})
+	keyValue, createErr := s.GenerateKey()
 	if createErr == nil {
-		return created, nil
+		created := &APIKey{
+			UserID:  userID,
+			Key:     keyValue,
+			Name:    "TransitAI Internal",
+			Source:  APIKeySourceUserAI,
+			GroupID: groupID,
+			Status:  StatusActive,
+		}
+		createErr = s.apiKeyRepo.Create(ctx, created)
+		if createErr == nil {
+			s.InvalidateAuthCacheByKey(ctx, created.Key)
+			s.compileAPIKeyIPRules(created)
+			return created, nil
+		}
 	}
-
 	key, err = s.apiKeyRepo.GetBySourceForUserGroup(ctx, userID, groupID, APIKeySourceUserAI)
 	if err == nil {
 		s.compileAPIKeyIPRules(key)
@@ -821,7 +839,31 @@ func (s *APIKeyService) GetAvailableGroups(ctx context.Context, userID int64) ([
 	// 过滤出用户有权限的分组
 	availableGroups := make([]Group, 0)
 	for _, group := range allGroups {
-		if s.canUserBindGroupInternal(user, &group, subscribedGroupIDs) {
+		if s.isGroupAvailableToUser(user, &group, subscribedGroupIDs, nil) {
+			availableGroups = append(availableGroups, group)
+		}
+	}
+
+	if user != nil && !user.IsAdmin() {
+		availableByID := make(map[int64]struct{}, len(availableGroups))
+		for _, group := range availableGroups {
+			availableByID[group.ID] = struct{}{}
+		}
+		keyGroupIDs, err := s.listActiveUserAPIKeyGroupIDs(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		for _, group := range allGroups {
+			if _, ok := availableByID[group.ID]; ok {
+				continue
+			}
+			if group.IsSubscriptionType() {
+				continue
+			}
+			if _, ok := keyGroupIDs[group.ID]; !ok {
+				continue
+			}
+			availableByID[group.ID] = struct{}{}
 			availableGroups = append(availableGroups, group)
 		}
 	}
@@ -831,12 +873,85 @@ func (s *APIKeyService) GetAvailableGroups(ctx context.Context, userID int64) ([
 
 // canUserBindGroupInternal 内部方法，检查用户是否可以绑定分组（使用预加载的订阅数据）
 func (s *APIKeyService) canUserBindGroupInternal(user *User, group *Group, subscribedGroupIDs map[int64]bool) bool {
+	return s.isGroupAvailableToUser(user, group, subscribedGroupIDs, nil)
+}
+
+func (s *APIKeyService) isGroupAvailableToUser(user *User, group *Group, subscribedGroupIDs map[int64]bool, activeKeyGroupIDs map[int64]struct{}) bool {
+	if user == nil || group == nil {
+		return false
+	}
+	if user.IsAdmin() {
+		return true
+	}
 	// 订阅类型分组：需要有效订阅
 	if group.IsSubscriptionType() {
 		return subscribedGroupIDs[group.ID]
 	}
 	// 标准类型分组：使用原有逻辑
-	return user.CanBindGroup(group.ID, group.IsExclusive)
+	if user.CanBindGroup(group.ID, group.IsExclusive) {
+		return true
+	}
+	_, ok := activeKeyGroupIDs[group.ID]
+	return ok
+}
+
+func (s *APIKeyService) resolveAvailableGroup(ctx context.Context, userID, groupID int64) (*Group, error) {
+	if groupID <= 0 {
+		return nil, ErrGroupNotAllowed
+	}
+
+	user, err := s.userRepo.GetByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user: %w", err)
+	}
+	group, err := s.groupRepo.GetByID(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("get group: %w", err)
+	}
+	if group == nil || !group.IsActive() {
+		return nil, ErrGroupNotAllowed
+	}
+
+	activeSubscriptions, err := s.userSubRepo.ListActiveByUserID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list active subscriptions: %w", err)
+	}
+	subscribedGroupIDs := make(map[int64]bool, len(activeSubscriptions))
+	for _, sub := range activeSubscriptions {
+		subscribedGroupIDs[sub.GroupID] = true
+	}
+	activeKeyGroupIDs, err := s.listActiveUserAPIKeyGroupIDs(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.isGroupAvailableToUser(user, group, subscribedGroupIDs, activeKeyGroupIDs) {
+		return group, nil
+	}
+	return nil, ErrGroupNotAllowed
+}
+
+func (s *APIKeyService) listActiveUserAPIKeyGroupIDs(ctx context.Context, userID int64) (map[int64]struct{}, error) {
+	keys, _, err := s.apiKeyRepo.ListByUserID(ctx, userID, pagination.PaginationParams{
+		Page:     1,
+		PageSize: 10000,
+	}, APIKeyListFilters{Status: StatusActive})
+	if err != nil {
+		return nil, fmt.Errorf("list user api keys: %w", err)
+	}
+
+	out := make(map[int64]struct{})
+	for i := range keys {
+		key := keys[i]
+		if key.GroupID == nil || *key.GroupID <= 0 {
+			continue
+		}
+		if key.IsExpired() || key.IsQuotaExhausted() {
+			continue
+		}
+		out[*key.GroupID] = struct{}{}
+	}
+	return out, nil
 }
 
 func (s *APIKeyService) SearchAPIKeys(ctx context.Context, userID int64, keyword string, limit int) ([]APIKey, error) {

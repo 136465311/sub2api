@@ -631,12 +631,7 @@ async function loadModels(): Promise<void> {
     }
 
     const defaultGroup = result.default_group_id ?? result.groups?.[0]?.id ?? null
-    if (!activeConversation.value) {
-      selectedGroupId.value = selectedGroupId.value ?? defaultGroup
-      const models = selectedGroup.value?.models || []
-      selectedModel.value = result.default_model || selectedModel.value || models[0] || ''
-    }
-    syncActiveConversationSelection()
+    applyAvailableModelSelection(activeConversation.value, defaultGroup, result.default_model || '')
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('aiChat.loadFailed')))
   } finally {
@@ -920,14 +915,52 @@ function buildAssistantImageContent(images: Array<{ url?: string; b64_json?: str
 }
 
 function syncActiveConversationSelection(): void {
-  const conversation = activeConversation.value
-  if (!conversation) return
-  if (conversation.group_id && modelsResult.value.groups.some((group) => group.id === conversation.group_id)) {
-    selectedGroupId.value = conversation.group_id
+  applyAvailableModelSelection(activeConversation.value, modelsResult.value.default_group_id ?? modelsResult.value.groups[0]?.id ?? null, modelsResult.value.default_model || '')
+}
+
+function applyAvailableModelSelection(
+  conversation: AIConversation | null,
+  defaultGroupId: number | null,
+  defaultModel: string
+): void {
+  const groups = modelsResult.value.groups || []
+  if (groups.length === 0) {
+    selectedGroupId.value = null
+    selectedModel.value = ''
+    return
   }
-  if (conversation.model) {
-    selectedModel.value = conversation.model
+
+  const conversationGroup = conversation?.group_id
+  const preferredGroupId =
+    conversationGroup && groups.some((group) => group.id === conversationGroup)
+      ? conversationGroup
+      : selectedGroupId.value && groups.some((group) => group.id === selectedGroupId.value)
+        ? selectedGroupId.value
+        : defaultGroupId && groups.some((group) => group.id === defaultGroupId)
+          ? defaultGroupId
+          : groups[0]?.id ?? null
+
+  selectedGroupId.value = preferredGroupId
+
+  const models = groups.find((group) => group.id === preferredGroupId)?.models || []
+  if (models.length === 0) {
+    selectedModel.value = ''
+    return
   }
+
+  const conversationModel = conversation?.model || ''
+  if (conversationModel && models.includes(conversationModel)) {
+    selectedModel.value = conversationModel
+    return
+  }
+  if (selectedModel.value && models.includes(selectedModel.value)) {
+    return
+  }
+  if (defaultModel && models.includes(defaultModel)) {
+    selectedModel.value = defaultModel
+    return
+  }
+  selectedModel.value = models[0] || ''
 }
 
 function openImagePreview(url: string, alt: string): void {
