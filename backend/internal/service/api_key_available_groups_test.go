@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,10 +91,17 @@ func (s *availableGroupsGroupRepoStub) UpdateSortOrders(context.Context, []Group
 }
 
 type availableGroupsAPIKeyRepoStub struct {
-	keys []APIKey
+	mu         sync.Mutex
+	keys       []APIKey
+	createHook func()
 }
 
 func (s *availableGroupsAPIKeyRepoStub) Create(_ context.Context, key *APIKey) error {
+	if s.createHook != nil {
+		s.createHook()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	key.ID = int64(len(s.keys) + 1)
 	clone := *key
 	s.keys = append(s.keys, clone)
@@ -111,7 +119,20 @@ func (s *availableGroupsAPIKeyRepoStub) GetByKey(context.Context, string) (*APIK
 func (s *availableGroupsAPIKeyRepoStub) GetByKeyForAuth(context.Context, string) (*APIKey, error) {
 	panic("unexpected GetByKeyForAuth call")
 }
-func (s *availableGroupsAPIKeyRepoStub) GetBySourceForUserGroup(context.Context, int64, *int64, string) (*APIKey, error) {
+func (s *availableGroupsAPIKeyRepoStub) GetBySourceForUserGroup(_ context.Context, userID int64, groupID *int64, source string) (*APIKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := len(s.keys) - 1; i >= 0; i-- {
+		key := s.keys[i]
+		if key.UserID != userID || key.Source != source {
+			continue
+		}
+		if !optionalInt64Equal(key.GroupID, groupID) {
+			continue
+		}
+		clone := key
+		return &clone, nil
+	}
 	return nil, ErrAPIKeyNotFound
 }
 func (s *availableGroupsAPIKeyRepoStub) Update(context.Context, *APIKey) error {
@@ -124,6 +145,8 @@ func (s *availableGroupsAPIKeyRepoStub) DeleteWithAudit(context.Context, int64) 
 	panic("unexpected DeleteWithAudit call")
 }
 func (s *availableGroupsAPIKeyRepoStub) ListByUserID(_ context.Context, userID int64, _ pagination.PaginationParams, filters APIKeyListFilters) ([]APIKey, *pagination.PaginationResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	out := make([]APIKey, 0, len(s.keys))
 	for _, key := range s.keys {
 		if key.UserID != userID || key.Source != APIKeySourceUser {
@@ -180,6 +203,13 @@ func (s *availableGroupsAPIKeyRepoStub) ResetRateLimitWindows(context.Context, i
 }
 func (s *availableGroupsAPIKeyRepoStub) GetRateLimitData(context.Context, int64) (*APIKeyRateLimitData, error) {
 	panic("unexpected GetRateLimitData call")
+}
+
+func optionalInt64Equal(left, right *int64) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 type availableGroupsSubRepoStub struct {
@@ -339,6 +369,87 @@ func TestAPIKeyServiceGetOrCreateUserAIInternalKeyAllowsExistingUserKeyGroup(t *
 	require.NotNil(t, key)
 	require.Equal(t, APIKeySourceUserAI, key.Source)
 	require.Equal(t, &groupID, key.GroupID)
+}
+
+func TestAPIKeyServiceGetOrCreateUserAIInternalKeyReusesExistingHiddenKey(t *testing.T) {
+	groupID := int64(12)
+	keyRepo := &availableGroupsAPIKeyRepoStub{
+		keys: []APIKey{
+			{ID: 55, UserID: 7, Key: "manual-key", Source: APIKeySourceUser, Status: StatusActive, GroupID: &groupID},
+			{ID: 56, UserID: 7, Key: "hidden-key", Source: APIKeySourceUserAI, Status: StatusActive, GroupID: &groupID},
+		},
+	}
+	svc := NewAPIKeyService(
+		keyRepo,
+		&availableGroupsUserRepoStub{user: &User{ID: 7, Role: RoleUser, Status: StatusActive}},
+		&availableGroupsGroupRepoStub{groups: []Group{{ID: groupID, Name: "chatgpt-plus", Status: StatusActive, SubscriptionType: SubscriptionTypeStandard}}},
+		&availableGroupsSubRepoStub{},
+		nil,
+		nil,
+		&config.Config{},
+	)
+
+	key, err := svc.GetOrCreateUserAIInternalKey(context.Background(), 7, &groupID)
+
+	require.NoError(t, err)
+	require.Equal(t, int64(56), key.ID)
+	require.Equal(t, "hidden-key", key.Key)
+	require.Len(t, keyRepo.keys, 2)
+}
+
+func TestAPIKeyServiceGetOrCreateUserAIInternalKeySingleflightsConcurrentCreates(t *testing.T) {
+	groupID := int64(12)
+	releaseCreate := make(chan struct{})
+	var hookOnce sync.Once
+	keyRepo := &availableGroupsAPIKeyRepoStub{
+		createHook: func() {
+			hookOnce.Do(func() {
+				<-releaseCreate
+			})
+		},
+	}
+	svc := NewAPIKeyService(
+		keyRepo,
+		&availableGroupsUserRepoStub{user: &User{ID: 7, Role: RoleUser, Status: StatusActive}},
+		&availableGroupsGroupRepoStub{groups: []Group{{ID: groupID, Name: "chatgpt-plus", Status: StatusActive, SubscriptionType: SubscriptionTypeStandard}}},
+		&availableGroupsSubRepoStub{},
+		nil,
+		nil,
+		&config.Config{},
+	)
+
+	const callers = 8
+	start := make(chan struct{})
+	results := make(chan *APIKey, callers)
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			<-start
+			key, err := svc.GetOrCreateUserAIInternalKey(context.Background(), 7, &groupID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- key
+		}()
+	}
+
+	close(start)
+	close(releaseCreate)
+
+	for i := 0; i < callers; i++ {
+		select {
+		case err := <-errs:
+			require.NoError(t, err)
+		case key := <-results:
+			require.Equal(t, int64(1), key.ID)
+			require.Equal(t, APIKeySourceUserAI, key.Source)
+			require.Equal(t, &groupID, key.GroupID)
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for concurrent internal key create")
+		}
+	}
+	require.Len(t, keyRepo.keys, 1)
 }
 
 func newAvailableGroupsTestService(user *User, groups []Group, keys []APIKey, subs []UserSubscription) *APIKeyService {

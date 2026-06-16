@@ -32,6 +32,7 @@ func NewAPIKeyRepository(client *dbent.Client, sqlDB *sql.DB) service.APIKeyRepo
 
 func newAPIKeyRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *apiKeyRepository {
 	ensureAPIKeySourceColumn(sqlq)
+	ensureUserAIInternalKeyUniqueIndex(sqlq)
 	return &apiKeyRepository{client: client, sql: sqlq}
 }
 
@@ -48,6 +49,17 @@ func ensureAPIKeySourceColumn(sqlq sqlExecutor) {
 	_, _ = sqlq.ExecContext(context.Background(), `
 		ALTER TABLE api_keys
 		ADD COLUMN source TEXT NOT NULL DEFAULT 'user'
+	`)
+}
+
+func ensureUserAIInternalKeyUniqueIndex(sqlq sqlExecutor) {
+	if sqlq == nil {
+		return
+	}
+	_, _ = sqlq.ExecContext(context.Background(), `
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_user_ai_internal_unique
+		ON api_keys (user_id, COALESCE(group_id, 0), source)
+		WHERE deleted_at IS NULL AND source = 'user_ai'
 	`)
 }
 

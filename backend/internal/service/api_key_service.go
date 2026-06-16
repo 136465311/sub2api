@@ -212,6 +212,7 @@ type APIKeyService struct {
 	authGroup             singleflight.Group
 	lastUsedTouchL1       sync.Map // keyID -> nextAllowedAt(time.Time)
 	lastUsedTouchSF       singleflight.Group
+	userAIInternalKeySF   singleflight.Group
 }
 
 // NewAPIKeyService 创建API Key服务实例
@@ -462,6 +463,27 @@ func (s *APIKeyService) GetOrCreateUserAIInternalKey(ctx context.Context, userID
 		}
 	}
 
+	result, err, _ := s.userAIInternalKeySF.Do(userAIInternalKeySingleflightKey(userID, groupID), func() (any, error) {
+		return s.getOrCreateUserAIInternalKey(ctx, userID, groupID)
+	})
+	if err != nil {
+		return nil, err
+	}
+	key, ok := result.(*APIKey)
+	if !ok || key == nil {
+		return nil, fmt.Errorf("create internal user ai key: unexpected result")
+	}
+	return key, nil
+}
+
+func userAIInternalKeySingleflightKey(userID int64, groupID *int64) string {
+	if groupID == nil {
+		return fmt.Sprintf("%d:0", userID)
+	}
+	return fmt.Sprintf("%d:%d", userID, *groupID)
+}
+
+func (s *APIKeyService) getOrCreateUserAIInternalKey(ctx context.Context, userID int64, groupID *int64) (*APIKey, error) {
 	key, err := s.apiKeyRepo.GetBySourceForUserGroup(ctx, userID, groupID, APIKeySourceUserAI)
 	if err == nil {
 		s.compileAPIKeyIPRules(key)
