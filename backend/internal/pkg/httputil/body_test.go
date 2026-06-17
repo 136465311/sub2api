@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -78,6 +81,34 @@ func TestReadRequestBodyWithPrealloc_DecodesGzip(t *testing.T) {
 	}
 }
 
+func TestReadRequestBodyWithPrealloc_CompressedBodyRespectsContextLimit(t *testing.T) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	if _, err := gw.Write([]byte(samplePayload)); err != nil {
+		t.Fatalf("gzip write: %v", err)
+	}
+	if err := gw.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := newRequestWithBody(t, buf.Bytes(), "gzip")
+	req.Body = http.MaxBytesReader(rec, req.Body, int64(len(buf.Bytes())+1024))
+	req = req.WithContext(WithRequestBodyLimit(req.Context(), 8))
+
+	_, err := ReadRequestBodyWithPrealloc(req)
+	if err == nil {
+		t.Fatal("expected decompressed body limit error, got nil")
+	}
+	if !errors.Is(err, ErrDecompressedBodyTooLarge) {
+		t.Fatalf("expected ErrDecompressedBodyTooLarge, got %v", err)
+	}
+	var maxErr *http.MaxBytesError
+	if !errors.As(err, &maxErr) || maxErr.Limit != 8 {
+		t.Fatalf("expected MaxBytesError limit 8, got %#v", maxErr)
+	}
+}
+
 func TestReadRequestBodyWithPrealloc_DecodesDeflate(t *testing.T) {
 	var buf bytes.Buffer
 	zw := zlib.NewWriter(&buf)
@@ -139,5 +170,31 @@ func TestReadRequestBodyWithPrealloc_RespectsIdentityEncoding(t *testing.T) {
 	}
 	if string(got) != samplePayload {
 		t.Fatalf("body mismatch: got %q", got)
+	}
+}
+
+func TestRequestBodyLimitContextRoundTrip(t *testing.T) {
+	ctx := WithRequestBodyLimit(nil, 12)
+	limit, ok := RequestBodyLimitFromContext(ctx)
+	if !ok || limit != 12 {
+		t.Fatalf("limit=(%d,%v), want (12,true)", limit, ok)
+	}
+
+	limit, ok = RequestBodyLimitFromContext(WithRequestBodyLimit(ctx, -1))
+	if !ok || limit != 12 {
+		t.Fatalf("negative limit should leave context unchanged, got (%d,%v)", limit, ok)
+	}
+
+	if _, ok := RequestBodyLimitFromContext(nil); ok {
+		t.Fatalf("nil context should not have a request body limit")
+	}
+
+	body, err := readDecodedRequestBody(strings.NewReader("abc"), 0)
+	if err != nil || string(body) != "abc" {
+		t.Fatalf("unlimited decoded body mismatch: %q err=%v", body, err)
+	}
+	_, err = readDecodedRequestBody(io.LimitReader(strings.NewReader("abcd"), 4), 3)
+	if !errors.Is(err, ErrDecompressedBodyTooLarge) {
+		t.Fatalf("expected ErrDecompressedBodyTooLarge, got %v", err)
 	}
 }

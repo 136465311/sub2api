@@ -45,15 +45,27 @@ func (h *GatewayHandler) Responses(c *gin.Context) {
 	)
 
 	// Read request body
+	inboundContentLength := c.Request.ContentLength
+	inboundContentEncoding := c.GetHeader("Content-Encoding")
 	body, err := pkghttputil.ReadRequestBodyWithPrealloc(c.Request)
 	if err != nil {
 		if maxErr, ok := extractMaxBytesError(err); ok {
+			reqLog.Warn("gateway.responses.request_body_too_large",
+				zap.Int64("body_limit_bytes", maxErr.Limit),
+				zap.Int64("content_length", inboundContentLength),
+				zap.String("content_encoding", inboundContentEncoding),
+			)
 			h.responsesErrorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
 		}
 		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
 	}
+	reqLog.Info("gateway.responses.request_body_read",
+		zap.Int("decoded_body_bytes", len(body)),
+		zap.Int64("content_length", inboundContentLength),
+		zap.String("content_encoding", inboundContentEncoding),
+	)
 
 	if len(body) == 0 {
 		h.responsesErrorResponse(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")

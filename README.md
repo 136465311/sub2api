@@ -153,6 +153,16 @@ underscores_in_headers on;
 
 Nginx drops headers containing underscores by default (e.g. `session_id`), which breaks sticky session routing in multi-account setups.
 
+Codex long-running tasks can also send large `/responses` compaction payloads. Nginx defaults `client_max_body_size` to `1m`, which returns an HTML `413 Request Entity Too Large` before the request reaches Sub2API. Set the reverse proxy limit no lower than your current deployment limit and `gateway.max_body_size`:
+
+```nginx
+server {
+    client_max_body_size 500m;
+}
+```
+
+See [`deploy/nginx.sub2api.conf`](deploy/nginx.sub2api.conf) for a full example with request-size access logs and an `X-Sub2API-413-Layer: nginx` diagnostic response header.
+
 ---
 
 ## Deployment

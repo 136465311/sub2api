@@ -1,7 +1,9 @@
 package middleware
 
 import (
+	"bytes"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -209,6 +211,53 @@ func TestLogger_AccessLogUsesForwardedClientIP(t *testing.T) {
 		return
 	}
 	t.Fatalf("access log event not found")
+}
+
+func TestRequestBodyLimit_LogsBodySizeForGatewayPaths(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	sink := initMiddlewareTestLogger(t)
+
+	r := gin.New()
+	r.Use(RequestLogger())
+	r.Use(RequestBodyLimit(4))
+	r.POST("/responses", func(c *gin.Context) {
+		_, err := io.ReadAll(c.Request.Body)
+		if err == nil {
+			t.Fatalf("expected body read error")
+		}
+		c.Status(http.StatusRequestEntityTooLarge)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/responses", bytes.NewBufferString("12345"))
+	req.Header.Set("Content-Encoding", "identity")
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d", w.Code)
+	}
+
+	for _, event := range sink.list() {
+		if event == nil || event.Message != "request body size observed" {
+			continue
+		}
+		if event.Fields["component"] != "http.request_body" {
+			t.Fatalf("component=%v", event.Fields["component"])
+		}
+		if event.Fields["path"] != "/responses" {
+			t.Fatalf("path=%v", event.Fields["path"])
+		}
+		if event.Fields["body_limit_bytes"] != int64(4) {
+			t.Fatalf("body_limit_bytes=%v", event.Fields["body_limit_bytes"])
+		}
+		if event.Fields["content_length_exceeds_limit"] != true {
+			t.Fatalf("content_length_exceeds_limit=%v", event.Fields["content_length_exceeds_limit"])
+		}
+		if event.Fields["body_read_bytes"] == int64(0) {
+			t.Fatalf("body_read_bytes should be non-zero")
+		}
+		return
+	}
+	t.Fatalf("request body size log event not found")
 }
 
 func TestLogger_HealthPathSkipped(t *testing.T) {
