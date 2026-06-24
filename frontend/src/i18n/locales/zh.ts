@@ -672,6 +672,7 @@ export default {
     imageCompressedTooLarge: '图片压缩后仍超过 2MB，请选择更小的图片',
     imageUploading: '图片上传中...',
     imageUploadFailed: '图片上传失败，请重试',
+    continuingImageEdit: '正在基于上一轮图片继续编辑。',
     you: '你',
     assistant: '助手',
     emptyTitle: '开始对话',

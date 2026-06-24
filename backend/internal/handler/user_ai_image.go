@@ -34,6 +34,7 @@ const (
 	userAIImageSizeContextKey   = "_user_ai_image_size"
 	userAIImageCountContextKey  = "_user_ai_image_count"
 	userAIImageUserContextKey   = "_user_ai_image_user_content"
+	userAIImageRefsContextKey   = "_user_ai_image_reference_urls"
 )
 
 type userAIImageGenerationRequest struct {
@@ -128,6 +129,7 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 		c.Abort()
 		return
 	}
+	conversationID := parseOptionalInt64Value(req.ConversationID)
 
 	groupRequest := parseUserAIGroupRequest(req.GroupID, req.GroupName, req.Group)
 	group, err := h.userAIService.ResolveImageRequestedGroup(c.Request.Context(), subject.UserID, groupRequest)
@@ -145,30 +147,65 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 		return
 	}
 
-	payload := map[string]any{
-		"prompt":          req.Prompt,
-		"model":           req.Model,
-		"size":            req.Size,
-		"n":               req.N,
-		"response_format": "url",
+	promptForModel := req.Prompt
+	userContent := req.Prompt
+	targetPath := "/v1/images/generations"
+	contentType := "application/json"
+	var cleanBody []byte
+	if conversationID > 0 {
+		imageContext, err := h.userAIService.ResolveImageConversationContext(c.Request.Context(), subject.UserID, conversationID, req.Prompt)
+		if err != nil {
+			if !errors.Is(err, service.ErrAIConversationNotFound) {
+				response.ErrorFrom(c, err)
+				c.Abort()
+				return
+			}
+		}
+		if imageContext != nil && len(imageContext.ReferenceImageURLs) > 0 {
+			if relativeImageURLs, err := validateUserAIEditImageURLs(subject.UserID, imageContext.ReferenceImageURLs); err == nil {
+				editReq := userAIImageEditRequest{
+					Prompt: imageContext.Prompt,
+					Model:  req.Model,
+					Size:   req.Size,
+					N:      req.N,
+				}
+				if editBody, editContentType, err := h.buildUserAIImageEditMultipartBody(editReq, relativeImageURLs); err == nil {
+					cleanBody = editBody
+					contentType = editContentType
+					targetPath = "/v1/images/edits"
+					promptForModel = editReq.Prompt
+					userContent = userAIImageEditUserContent(req.Prompt, relativeImageURLs)
+					c.Set(userAIImageRefsContextKey, relativeImageURLs)
+				}
+			}
+		}
 	}
-	cleanBody, err := json.Marshal(payload)
-	if err != nil {
-		response.BadRequest(c, "Invalid request body")
-		c.Abort()
-		return
+	if len(cleanBody) == 0 {
+		payload := map[string]any{
+			"prompt":          req.Prompt,
+			"model":           req.Model,
+			"size":            req.Size,
+			"n":               req.N,
+			"response_format": "url",
+		}
+		cleanBody, err = json.Marshal(payload)
+		if err != nil {
+			response.BadRequest(c, "Invalid request body")
+			c.Abort()
+			return
+		}
 	}
 
 	c.Set(userAIGroupIDContextKey, resolvedGroupID)
-	c.Set(userAIImagePromptContextKey, req.Prompt)
+	c.Set(userAIImagePromptContextKey, promptForModel)
 	c.Set(userAIImageModelContextKey, req.Model)
 	c.Set(userAIImageSizeContextKey, req.Size)
 	c.Set(userAIImageCountContextKey, req.N)
-	c.Set(userAIImageUserContextKey, req.Prompt)
-	c.Set(userAIConversationIDContextKey, parseOptionalInt64Value(req.ConversationID))
-	c.Request.URL.Path = "/v1/images/generations"
+	c.Set(userAIImageUserContextKey, userContent)
+	c.Set(userAIConversationIDContextKey, conversationID)
+	c.Request.URL.Path = targetPath
 	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
-	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("Content-Type", contentType)
 	c.Request.Header.Del("x-api-key")
 	c.Request.Header.Del("x-goog-api-key")
 	c.Request.Body = io.NopCloser(bytes.NewReader(cleanBody))
@@ -327,6 +364,12 @@ func (h *UserAIHandler) ImageGenerations(c *gin.Context) {
 	n, _ := c.Get(userAIImageCountContextKey)
 	promptText := stringFromAny(prompt)
 	modelText := stringFromAny(model)
+	referenceImageURLs := stringSliceFromContext(c, userAIImageRefsContextKey)
+	if len(referenceImageURLs) > 0 {
+		if rewrittenBody, ok := annotateUserAIImageResponseContext(responseBody, referenceImageURLs, promptText); ok {
+			responseBody = rewrittenBody
+		}
+	}
 	userContent := promptText
 	if rawUserContent := userContentStringFromContext(c, userAIImageUserContextKey); rawUserContent != "" {
 		userContent = rawUserContent
@@ -716,6 +759,27 @@ func userContentStringFromContext(c *gin.Context, key string) string {
 	return strings.TrimSpace(stringFromAny(value))
 }
 
+func stringSliceFromContext(c *gin.Context, key string) []string {
+	if c == nil {
+		return nil
+	}
+	value, ok := c.Get(key)
+	if !ok {
+		return nil
+	}
+	values, ok := value.([]string)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
 func extractUserAIImageResults(body []byte) []string {
 	data := gjson.GetBytes(body, "data")
 	if !data.IsArray() {
@@ -903,6 +967,35 @@ func rewriteUserAIImageResponseURLs(body []byte, images []string) ([]byte, bool)
 	}
 	if !changed {
 		return nil, false
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, false
+	}
+	return out, true
+}
+
+func annotateUserAIImageResponseContext(body []byte, referenceImageURLs []string, prompt string) ([]byte, bool) {
+	if len(referenceImageURLs) == 0 || len(bytes.TrimSpace(body)) == 0 || !gjson.ValidBytes(body) {
+		return nil, false
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, false
+	}
+	refs := make([]string, 0, len(referenceImageURLs))
+	for _, imageURL := range referenceImageURLs {
+		if trimmed := strings.TrimSpace(imageURL); trimmed != "" {
+			refs = append(refs, trimmed)
+		}
+	}
+	if len(refs) == 0 {
+		return nil, false
+	}
+	payload["context_used"] = true
+	payload["referenced_image_urls"] = refs
+	if prompt = strings.TrimSpace(prompt); prompt != "" {
+		payload["effective_prompt"] = prompt
 	}
 	out, err := json.Marshal(payload)
 	if err != nil {

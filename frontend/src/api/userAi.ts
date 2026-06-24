@@ -39,6 +39,9 @@ export interface AIImageGenerationResponse {
   data: AIImageGenerationImage[]
   size?: string
   model?: string
+  context_used?: boolean
+  referenced_image_urls?: string[]
+  effective_prompt?: string
 }
 
 export interface AIImageHistoryItem {
@@ -204,7 +207,10 @@ function normalizeImageGenerationResponse(raw: RawRecord): AIImageGenerationResp
     created: toNumber(raw?.created ?? raw?.created_at),
     data,
     ...(typeof raw?.size === 'string' && raw.size ? { size: raw.size } : {}),
-    ...(typeof raw?.model === 'string' && raw.model ? { model: raw.model } : {})
+    ...(typeof raw?.model === 'string' && raw.model ? { model: raw.model } : {}),
+    ...(typeof raw?.context_used === 'boolean' ? { context_used: raw.context_used } : {}),
+    ...(Array.isArray(raw?.referenced_image_urls) ? { referenced_image_urls: toStringArray(raw.referenced_image_urls) } : {}),
+    ...(typeof raw?.effective_prompt === 'string' && raw.effective_prompt ? { effective_prompt: raw.effective_prompt } : {})
   }
 }
 

@@ -673,6 +673,7 @@ export default {
     imageCompressedTooLarge: 'The compressed image is still over 2MB. Please choose a smaller image.',
     imageUploading: 'Uploading image...',
     imageUploadFailed: 'Image upload failed. Please try again.',
+    continuingImageEdit: 'Continuing from the previous image.',
     you: 'You',
     assistant: 'Assistant',
     emptyTitle: 'Start a conversation',

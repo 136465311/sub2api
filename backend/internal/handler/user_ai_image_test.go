@@ -188,6 +188,121 @@ func TestUserAIImageEditUserContent(t *testing.T) {
 	}
 }
 
+func TestPrepareImageGenerationsProxyUsesConversationHistoryReferences(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(12)
+	conversationID := int64(42)
+	apiKeyRepo := &userAIImageAPIKeyRepoStub{
+		keys: []service.APIKey{{
+			ID:      99,
+			UserID:  7,
+			Key:     "sk-user-ai-internal",
+			Source:  service.APIKeySourceUserAI,
+			GroupID: &groupID,
+			Status:  service.StatusAPIKeyActive,
+		}},
+	}
+	apiKeyService := service.NewAPIKeyService(
+		apiKeyRepo,
+		&userAIImageUserRepoStub{},
+		&userAIImageGroupRepoStub{
+			groups: []service.Group{{
+				ID:       groupID,
+				Name:     "image",
+				Platform: service.PlatformOpenAI,
+				Status:   service.StatusActive,
+			}},
+		},
+		&userAIImageSubscriptionRepoStub{},
+		nil,
+		nil,
+		&config.Config{},
+	)
+	uploadRoot := t.TempDir()
+	userDir := filepath.Join(uploadRoot, "7", "generated")
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatalf("create upload dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "result.png"), tinyPNG(), 0644); err != nil {
+		t.Fatalf("write generated source image: %v", err)
+	}
+	h := &UserAIHandler{
+		userAIService: service.NewUserAIService(&userAIImageConversationRepoStub{
+			conversations: map[int64]*service.ChatConversation{
+				conversationID: {
+					ID:     conversationID,
+					UserID: 7,
+					Messages: []service.ChatMessage{
+						{Role: "user", Content: `[{"type":"text","text":"keep the two people together"},{"type":"image_url","image_url":{"url":"/uploads/user_ai/7/source.png"}}]`},
+						{Role: "assistant", Content: `[{"type":"image_url","image_url":{"url":"/uploads/user_ai/7/generated/result.png"}}]`},
+					},
+				},
+			},
+		}, apiKeyService, nil),
+		uploadRoot:        uploadRoot,
+		uploadPublicRoot:  userAIUploadPublicRoot,
+		uploadMaxFileSize: userAIUploadMaxFileSize,
+	}
+
+	body := `{"prompt":"make it id photo style","model":"gpt-image-2","size":"1:1","n":1,"group_id":12,"conversation_id":42}`
+	rec := httptest.NewRecorder()
+	nextCalled := false
+	router := gin.New()
+	router.POST("/api/v1/user/images/generations", func(c *gin.Context) {
+		c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 7})
+	}, h.PrepareImageGenerationsProxy, func(c *gin.Context) {
+		nextCalled = true
+		if got := c.Request.URL.Path; got != "/v1/images/edits" {
+			t.Fatalf("path = %q, want /v1/images/edits", got)
+		}
+		mediaType, params, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
+		if err != nil {
+			t.Fatalf("parse content-type: %v", err)
+		}
+		if mediaType != "multipart/form-data" {
+			t.Fatalf("content-type = %q", mediaType)
+		}
+		rewritten, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			t.Fatalf("read rewritten body: %v", err)
+		}
+		form, err := multipart.NewReader(bytes.NewReader(rewritten), params["boundary"]).ReadForm(userAIUploadMaxFileSize + (1 << 20))
+		if err != nil {
+			t.Fatalf("read multipart form: %v", err)
+		}
+		if got := form.Value["prompt"]; len(got) != 1 || !containsAll(got[0], "make it id photo style") {
+			t.Fatalf("unexpected merged prompt: %#v", got)
+		}
+		files := form.File["image"]
+		if len(files) != 1 {
+			t.Fatalf("expected one reference image file, got %#v", form.File)
+		}
+		if files[0].Filename != "result.png" {
+			t.Fatalf("expected assistant image reference, got %q", files[0].Filename)
+		}
+		if got := c.GetHeader("Authorization"); got != "Bearer sk-user-ai-internal" {
+			t.Fatalf("authorization header = %q", got)
+		}
+		contextRefs := stringSliceFromContext(c, userAIImageRefsContextKey)
+		if len(contextRefs) != 1 || contextRefs[0] != "/uploads/user_ai/7/generated/result.png" {
+			t.Fatalf("unexpected context refs: %#v", contextRefs)
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "https://chat.example/api/v1/user/images/generations", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("PrepareImageGenerationsProxy returned status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !nextCalled {
+		t.Fatal("expected next handler to be called")
+	}
+}
+
 func TestPrepareImageEditsProxyBuildsMultipartFromUploadedImageURLs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -331,6 +446,21 @@ func containsAll(input string, subs ...string) bool {
 
 type userAIImageRepoStub struct {
 	service.UserAIRepository
+}
+
+type userAIImageConversationRepoStub struct {
+	service.UserAIRepository
+	conversations map[int64]*service.ChatConversation
+}
+
+func (s *userAIImageConversationRepoStub) GetChatConversation(_ context.Context, userID, conversationID int64) (*service.ChatConversation, error) {
+	conversation, ok := s.conversations[conversationID]
+	if !ok || conversation == nil || conversation.UserID != userID {
+		return nil, service.ErrAIConversationNotFound
+	}
+	copyConversation := *conversation
+	copyConversation.Messages = append([]service.ChatMessage(nil), conversation.Messages...)
+	return &copyConversation, nil
 }
 
 type userAIImageAPIKeyRepoStub struct {

@@ -3,22 +3,33 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 )
 
 type userAIRepoStub struct {
-	messages    []ChatMessageCreateInput
-	updateTitle string
+	messages      []ChatMessageCreateInput
+	updateTitle   string
+	conversations map[int64]*ChatConversation
 }
 
 func (s *userAIRepoStub) ListChatConversations(context.Context, int64, pagination.PaginationParams, int) ([]ChatConversation, *pagination.PaginationResult, error) {
 	panic("unexpected ListChatConversations call")
 }
 
-func (s *userAIRepoStub) GetChatConversation(context.Context, int64, int64) (*ChatConversation, error) {
-	panic("unexpected GetChatConversation call")
+func (s *userAIRepoStub) GetChatConversation(_ context.Context, userID, conversationID int64) (*ChatConversation, error) {
+	if s.conversations == nil {
+		return nil, ErrAIConversationNotFound
+	}
+	conversation, ok := s.conversations[conversationID]
+	if !ok || conversation == nil || conversation.UserID != userID {
+		return nil, ErrAIConversationNotFound
+	}
+	copyConversation := *conversation
+	copyConversation.Messages = append([]ChatMessage(nil), conversation.Messages...)
+	return &copyConversation, nil
 }
 
 func (s *userAIRepoStub) CreateChatConversation(context.Context, ChatConversationCreateInput) (*ChatConversation, error) {
@@ -138,4 +149,76 @@ func TestIsOpenAIImageModelName(t *testing.T) {
 			t.Fatalf("isOpenAIImageModelName(%q) = %v, want %v", model, got, want)
 		}
 	}
+}
+
+func TestResolveImageConversationContextPrefersAssistantImage(t *testing.T) {
+	repo := &userAIRepoStub{
+		conversations: map[int64]*ChatConversation{
+			11: {
+				ID:     11,
+				UserID: 7,
+				Messages: []ChatMessage{
+					{Role: "user", Content: `[{"type":"text","text":"把两个人结合到一块"}]`},
+					{Role: "assistant", Content: `[{"type":"image_url","image_url":{"url":"/uploads/user_ai/7/generated/result.png"}}]`},
+				},
+			},
+		},
+	}
+	svc := NewUserAIService(repo, nil, nil)
+	ctx, err := svc.ResolveImageConversationContext(context.Background(), 7, 11, "让两个人脸变成证件照一样")
+	if err != nil {
+		t.Fatalf("ResolveImageConversationContext returned error: %v", err)
+	}
+	if ctx == nil {
+		t.Fatal("expected context")
+	}
+	if len(ctx.ReferenceImageURLs) != 1 || ctx.ReferenceImageURLs[0] != "/uploads/user_ai/7/generated/result.png" {
+		t.Fatalf("unexpected reference images: %#v", ctx.ReferenceImageURLs)
+	}
+	if !containsAll(ctx.Prompt, "把两个人结合到一块", "让两个人脸变成证件照一样") {
+		t.Fatalf("expected merged prompt, got %q", ctx.Prompt)
+	}
+	if !containsAll(ctx.Prompt, "基于上一轮图片继续修改。", "上一轮要求：", "本轮要求：") {
+		t.Fatalf("expected continuation prompt, got %q", ctx.Prompt)
+	}
+}
+
+func TestResolveImageConversationContextFallsBackToUserUpload(t *testing.T) {
+	repo := &userAIRepoStub{
+		conversations: map[int64]*ChatConversation{
+			12: {
+				ID:     12,
+				UserID: 7,
+				Messages: []ChatMessage{
+					{Role: "user", Content: `[{"type":"text","text":"把两个人结合到一块"},{"type":"image_url","image_url":{"url":"/uploads/user_ai/7/source.png"}}]`},
+				},
+			},
+		},
+	}
+	svc := NewUserAIService(repo, nil, nil)
+	ctx, err := svc.ResolveImageConversationContext(context.Background(), 7, 12, "改成证件照风格")
+	if err != nil {
+		t.Fatalf("ResolveImageConversationContext returned error: %v", err)
+	}
+	if ctx == nil {
+		t.Fatal("expected context")
+	}
+	if len(ctx.ReferenceImageURLs) != 1 || ctx.ReferenceImageURLs[0] != "/uploads/user_ai/7/source.png" {
+		t.Fatalf("unexpected reference images: %#v", ctx.ReferenceImageURLs)
+	}
+	if !containsAll(ctx.Prompt, "把两个人结合到一块", "改成证件照风格") {
+		t.Fatalf("expected merged prompt, got %q", ctx.Prompt)
+	}
+	if !containsAll(ctx.Prompt, "基于上一轮图片继续修改。", "上一轮要求：", "本轮要求：") {
+		t.Fatalf("expected continuation prompt, got %q", ctx.Prompt)
+	}
+}
+
+func containsAll(input string, subs ...string) bool {
+	for _, sub := range subs {
+		if !strings.Contains(input, sub) {
+			return false
+		}
+	}
+	return true
 }

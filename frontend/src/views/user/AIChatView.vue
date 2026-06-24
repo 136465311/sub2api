@@ -244,6 +244,10 @@
 
         <footer class="composer">
           <div class="composer-editor">
+            <div v-if="imageContinuationHint" class="image-continuation-hint">
+              <Icon name="sparkles" size="xs" />
+              <span>{{ imageContinuationHint }}</span>
+            </div>
             <div v-if="selectedImages.length" class="selected-image-strip">
               <div
                 v-for="image in selectedImages"
@@ -501,6 +505,7 @@ const selectedGroupId = ref<number | null>(null)
 const selectedModel = ref<string>('')
 const draft = ref('')
 const selectedImages = ref<SelectedImage[]>([])
+const imageContinuationHint = ref('')
 const loadingModels = ref(false)
 const loadingConversations = ref(false)
 const sending = ref(false)
@@ -725,7 +730,15 @@ async function sendMessage(): Promise<void> {
   sending.value = true
   abortController.value = new AbortController()
 
-  const userContent = serializeChatContent(buildUserContent(text, images))
+  const historyReferenceImageUrls =
+    isImageModel(selectedModel.value) && images.length === 0
+      ? latestImageModelReferenceUrls(conversation.id)
+      : []
+  if (historyReferenceImageUrls.length > 0) {
+    imageContinuationHint.value = t('aiChat.continuingImageEdit')
+    appStore.showInfo(t('aiChat.continuingImageEdit'))
+  }
+  const userContent = serializeChatContent(buildUserContent(text, images, historyReferenceImageUrls))
   const userMessage = makeLocalMessage(conversation.id, 'user', userContent)
   const assistantMessage = makeLocalMessage(conversation.id, 'assistant', '')
   appendLocalMessages(conversation.id, [userMessage, assistantMessage])
@@ -796,6 +809,7 @@ async function sendMessage(): Promise<void> {
   } finally {
     sending.value = false
     abortController.value = null
+    imageContinuationHint.value = ''
     await nextTick()
     inputRef.value?.focus()
   }
@@ -1136,14 +1150,22 @@ function canvasToJPEGBlob(canvas: HTMLCanvasElement, quality: number): Promise<B
   })
 }
 
-function buildUserContent(text: string, images: SelectedImage[]): ChatMessageContent {
-  if (images.length === 0) {
+function buildUserContent(text: string, images: SelectedImage[], referenceImageUrls: string[] = []): ChatMessageContent {
+  if (images.length === 0 && referenceImageUrls.length === 0) {
     return text
   }
 
   const content: ChatMessageContent = []
   if (text) {
     content.push({ type: 'text', text })
+  }
+  for (const imageUrl of referenceImageUrls) {
+    content.push({
+      type: 'image_url',
+      image_url: {
+        url: imageUrl
+      }
+    })
   }
   for (const image of images) {
     content.push({
@@ -1154,6 +1176,22 @@ function buildUserContent(text: string, images: SelectedImage[]): ChatMessageCon
     })
   }
   return content
+}
+
+function latestImageModelReferenceUrls(conversationId: number): string[] {
+  const conversation = conversations.value.find((item) => item.id === conversationId)
+  const messages = conversation?.messages || []
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== 'assistant') continue
+    const imageUrls = messageImageUrls(messages[i]).filter(isHostedUserAIImageUrl)
+    if (imageUrls.length > 0) return imageUrls.slice(0, maxSelectedImages)
+  }
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role !== 'user') continue
+    const imageUrls = messageImageUrls(messages[i]).filter(isHostedUserAIImageUrl)
+    if (imageUrls.length > 0) return imageUrls.slice(0, maxSelectedImages)
+  }
+  return []
 }
 
 function serializeChatContent(content: ChatMessageContent): string {
@@ -1248,9 +1286,13 @@ function isAllowedUploadedImageUrl(url: string): boolean {
 function isAllowedImageDisplayUrl(url: string): boolean {
   const trimmed = url.trim()
   return (
-    /^\/uploads\/user_ai\/\d+\/(?:generated\/)?[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp|gif)$/i.test(trimmed) ||
+    isHostedUserAIImageUrl(trimmed) ||
     /^https?:\/\//i.test(trimmed)
   )
+}
+
+function isHostedUserAIImageUrl(url: string): boolean {
+  return /^\/uploads\/user_ai\/\d+\/(?:generated\/)?[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp|gif)$/i.test(url.trim())
 }
 
 function isImageModel(model: string): boolean {
@@ -1828,6 +1870,20 @@ async function scrollToBottom(): Promise<void> {
 
 .composer-editor {
   min-width: 0;
+}
+
+.image-continuation-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgb(37 99 235);
+}
+
+.dark .image-continuation-hint {
+  color: rgb(96 165 250);
 }
 
 .composer-input-row {

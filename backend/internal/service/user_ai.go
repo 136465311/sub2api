@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -78,6 +80,12 @@ type ImageGenerationHistoryCreateInput struct {
 	Size    string
 	N       int
 	Images  []string
+}
+
+type ImageConversationContext struct {
+	Prompt             string
+	ReferenceImageURLs []string
+	PreviousPrompt     string
 }
 
 type ChatConversationCreateInput struct {
@@ -318,6 +326,149 @@ func (s *UserAIService) SaveImageGeneration(ctx context.Context, input ImageGene
 
 func (s *UserAIService) ListImageGenerationHistory(ctx context.Context, userID int64, params pagination.PaginationParams) ([]ImageGenerationHistory, *pagination.PaginationResult, error) {
 	return s.repo.ListImageGenerationHistory(ctx, userID, params)
+}
+
+func (s *UserAIService) ResolveImageConversationContext(ctx context.Context, userID int64, conversationID int64, prompt string) (*ImageConversationContext, error) {
+	prompt = strings.TrimSpace(prompt)
+	if userID <= 0 || conversationID <= 0 || prompt == "" {
+		return &ImageConversationContext{Prompt: prompt}, nil
+	}
+
+	conversation, err := s.repo.GetChatConversation(ctx, userID, conversationID)
+	if err != nil {
+		return nil, err
+	}
+
+	images, previousPrompt := latestImageConversationReference(conversation.Messages, userID)
+	if len(images) == 0 {
+		return &ImageConversationContext{Prompt: prompt}, nil
+	}
+
+	return &ImageConversationContext{
+		Prompt:             mergeImageContinuationPrompt(previousPrompt, prompt),
+		ReferenceImageURLs: images,
+		PreviousPrompt:     previousPrompt,
+	}, nil
+}
+
+func latestImageConversationReference(messages []ChatMessage, userID int64) ([]string, string) {
+	if len(messages) == 0 || userID <= 0 {
+		return nil, ""
+	}
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if strings.TrimSpace(message.Role) != "assistant" {
+			continue
+		}
+		images := extractHostedChatMessageImageURLs(message.Content, userID)
+		if len(images) == 0 {
+			continue
+		}
+		return images, previousUserPrompt(messages, i)
+	}
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if strings.TrimSpace(message.Role) != "user" {
+			continue
+		}
+		images := extractHostedChatMessageImageURLs(message.Content, userID)
+		if len(images) == 0 {
+			continue
+		}
+		prompt, _ := chatMessageContentSummary(message.Content)
+		return images, prompt
+	}
+	return nil, ""
+}
+
+func previousUserPrompt(messages []ChatMessage, before int) string {
+	if before > len(messages) {
+		before = len(messages)
+	}
+	for i := before - 1; i >= 0; i-- {
+		if strings.TrimSpace(messages[i].Role) != "user" {
+			continue
+		}
+		prompt, _ := chatMessageContentSummary(messages[i].Content)
+		if strings.TrimSpace(prompt) != "" {
+			return prompt
+		}
+	}
+	return ""
+}
+
+func mergeImageContinuationPrompt(previousPrompt, prompt string) string {
+	prompt = strings.TrimSpace(prompt)
+	previousPrompt = strings.TrimSpace(previousPrompt)
+	if prompt == "" || previousPrompt == "" || strings.EqualFold(previousPrompt, prompt) {
+		if prompt == "" {
+			return ""
+		}
+		return "基于上一轮图片继续修改。\n本轮要求：" + prompt
+	}
+	return "基于上一轮图片继续修改。\n上一轮要求：" + previousPrompt + "\n本轮要求：" + prompt
+}
+
+func extractHostedChatMessageImageURLs(content string, userID int64) []string {
+	content = strings.TrimSpace(content)
+	if content == "" || !strings.HasPrefix(content, "[") {
+		return nil
+	}
+	var parts []any
+	if err := json.Unmarshal([]byte(content), &parts); err != nil {
+		return nil
+	}
+	images := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	for _, part := range parts {
+		record, ok := part.(map[string]any)
+		if !ok {
+			continue
+		}
+		imageURL := strings.TrimSpace(chatMessageImageURLFromPart(record))
+		if !isHostedUserAIImageURLForUser(userID, imageURL) {
+			continue
+		}
+		if _, exists := seen[imageURL]; exists {
+			continue
+		}
+		seen[imageURL] = struct{}{}
+		images = append(images, imageURL)
+		if len(images) >= 4 {
+			break
+		}
+	}
+	return images
+}
+
+func chatMessageImageURLFromPart(record map[string]any) string {
+	if url := strings.TrimSpace(stringFromMapValue(record["url"])); url != "" {
+		return url
+	}
+	if url := strings.TrimSpace(stringFromMapValue(record["image_url"])); url != "" {
+		return url
+	}
+	imageURL, ok := record["image_url"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(stringFromMapValue(imageURL["url"]))
+}
+
+var hostedUserAIImageURLPattern = regexp.MustCompile(`^/uploads/user_ai/(\d+)/(?:generated/)?[A-Za-z0-9._-]+\.(?i:jpg|jpeg|png|webp|gif)$`)
+
+func isHostedUserAIImageURLForUser(userID int64, imageURL string) bool {
+	if userID <= 0 {
+		return false
+	}
+	matches := hostedUserAIImageURLPattern.FindStringSubmatch(strings.TrimSpace(imageURL))
+	if len(matches) != 2 {
+		return false
+	}
+	ownerID, err := strconv.ParseInt(matches[1], 10, 64)
+	return err == nil && ownerID == userID
 }
 
 func chatMessageContentSummary(content string) (string, bool) {
