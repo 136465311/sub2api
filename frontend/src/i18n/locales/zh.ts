@@ -372,6 +372,12 @@ export default {
     adminCompliance: '部署与运营合规承诺'
   },
 
+  customerGroup: {
+    title: '客服群',
+    qrAlt: '客服群二维码',
+    scanToJoin: '扫码加入客服群'
+  },
+
   // Navigation
   nav: {
     dashboard: '仪表盘',

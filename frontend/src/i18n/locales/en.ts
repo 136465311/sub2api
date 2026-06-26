@@ -372,6 +372,12 @@ export default {
     adminCompliance: 'Deployment and Operation Compliance Commitment'
   },
 
+  customerGroup: {
+    title: 'Support Group',
+    qrAlt: 'Support group QR code',
+    scanToJoin: 'Scan to join the support group'
+  },
+
   // Navigation
   nav: {
     dashboard: 'Dashboard',
