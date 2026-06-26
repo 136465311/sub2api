@@ -510,8 +510,10 @@ async function handleVerify(): Promise<void> {
       if (invitationCode.value) {
         payload.invitation_code = invitationCode.value
       }
-      if (pendingAdoptionDecision.value) {
+      if (pendingAdoptionDecision.value?.adoptDisplayName !== undefined) {
         payload.adopt_display_name = pendingAdoptionDecision.value.adoptDisplayName
+      }
+      if (pendingAdoptionDecision.value?.adoptAvatar !== undefined) {
         payload.adopt_avatar = pendingAdoptionDecision.value.adoptAvatar
       }
       const { data } = await apiClient.post<PendingOAuthCreateAccountResponse>(

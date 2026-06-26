@@ -457,6 +457,8 @@ const showDatePicker = ref(false)
 const resultData = ref<any>(null)
 const now = ref(new Date())
 let resetTimer: ReturnType<typeof setInterval> | null = null
+let ringStartTimer: ReturnType<typeof setTimeout> | null = null
+const ringAnimationFrames = new Set<number>()
 
 // ==================== Date Range State ====================
 
@@ -551,13 +553,36 @@ function getRingOffset(ring: RingItem): number {
   return CIRCUMFERENCE - (Math.min(ring.pct, 100) / 100) * CIRCUMFERENCE
 }
 
+function scheduleRingFrame(callback: FrameRequestCallback): number {
+  const requestFrame = window.requestAnimationFrame ?? ((cb: FrameRequestCallback) => window.setTimeout(() => cb(performance.now()), 16))
+  const frameId = requestFrame((time) => {
+    ringAnimationFrames.delete(frameId)
+    callback(time)
+  })
+  ringAnimationFrames.add(frameId)
+  return frameId
+}
+
+function cancelRingAnimation() {
+  if (ringStartTimer) {
+    clearTimeout(ringStartTimer)
+    ringStartTimer = null
+  }
+
+  const cancelFrame = window.cancelAnimationFrame ?? ((id: number) => clearTimeout(id))
+  ringAnimationFrames.forEach((frameId) => cancelFrame(frameId))
+  ringAnimationFrames.clear()
+}
+
 function triggerRingAnimation(items: RingItem[]) {
+  cancelRingAnimation()
   ringAnimated.value = false
   displayPcts.value = items.map(() => 0)
 
   nextTick(() => {
-    requestAnimationFrame(() => {
-      setTimeout(() => {
+    scheduleRingFrame(() => {
+      ringStartTimer = setTimeout(() => {
+        ringStartTimer = null
         ringAnimated.value = true
 
         // Animate percentage numbers
@@ -570,9 +595,9 @@ function triggerRingAnimation(items: RingItem[]) {
           const p = Math.min(elapsed / duration, 1)
           const ease = 1 - Math.pow(1 - p, 3)
           displayPcts.value = targets.map(target => Math.round(ease * target))
-          if (p < 1) requestAnimationFrame(tick)
+          if (p < 1) scheduleRingFrame(tick)
         }
-        requestAnimationFrame(tick)
+        scheduleRingFrame(tick)
       }, 50)
     })
   })
@@ -934,6 +959,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (resetTimer) clearInterval(resetTimer)
+  cancelRingAnimation()
 })
 </script>
 
