@@ -48,11 +48,6 @@ interface ChatTaskSnapshot {
   images: SelectedAIChatImage[]
 }
 
-interface TitleModelSelection {
-  model: string
-  groupId: number
-}
-
 interface ImageTaskSnapshot {
   taskId: string
   prompt: string
@@ -225,25 +220,91 @@ function buildUserContent(text: string, images: SelectedAIChatImage[], reference
 }
 
 function isUntitledConversationTitle(title: string): boolean {
-  const trimmed = title.trim()
-  return trimmed === '' || trimmed === t('aiChat.untitled') || trimmed === '新会话' || trimmed.toLowerCase() === 'new chat'
+  const trimmed = title.trim().toLowerCase()
+  return trimmed === '' || trimmed === t('aiChat.untitled').toLowerCase() || trimmed === '\u65b0\u4f1a\u8bdd' || trimmed === 'new chat' || trimmed === 'new conversation'
 }
 
-function normalizeGeneratedTitle(rawTitle: string, source: string): string {
-  const sourceNormalized = source.replace(/\s+/g, ' ').trim().toLowerCase()
-  let title = rawTitle
-    .split(/\r?\n/)[0]
-    .replace(/^["'“”‘’「」『』]+|["'“”‘’「」『』]+$/g, '')
-    .replace(/[。.!！?？]+$/g, '')
+function isCJKText(text: string): boolean {
+  return /[\u3400-\u9fff]/.test(text)
+}
+
+function normalizeTitleText(text: string): string {
+  return text
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/[“”"''`]+/g, '')
+    .replace(/[。.!！?？,，;；:：、()[\]{}<>《》【】]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-  if (!title) return ''
-  if (title.toLowerCase() === sourceNormalized) return ''
-  const runes = Array.from(title)
-  if (runes.length > 32) {
-    title = runes.slice(0, 32).join('').trim()
+}
+
+function buildSimpleConversationTitle(source: string): string {
+  const normalized = normalizeTitleText(source)
+  if (!normalized) return ''
+  return isCJKText(normalized)
+    ? buildSimpleChineseTitle(normalized)
+    : buildSimpleEnglishTitle(normalized)
+}
+
+function buildSimpleChineseTitle(source: string): string {
+  const compact = source
+    .replace(/\s+/g, '')
+    .replace(/^(我有一台|有一台|我有一个|有一个|我有个|有个|一台)/, '')
+    .replace(/^(请问|请帮我|帮我|麻烦|能不能|可以|我想要|我想|我需要|想要|如何|怎么|怎样|有没有)/, '')
+    .replace(/(一下|一个|一份|这个|那个|吗|呢|吧|的方案|的办法)$/g, '')
+
+  const serverPlaceMatch = compact.match(/([\u3400-\u9fff]{1,4}(?:服务器|主机|节点|VPS))/i)
+  const topicPatterns = [
+    serverPlaceMatch?.[1] || '',
+    matchFirst(compact, /(中转站|中转服务|订阅转换|反向代理|代理服务|服务器|主机|节点|VPS|域名|证书|Docker|数据库|登录|支付|账单|生图|图片|会话|标题|聊天|模型|接口|API)/i),
+    matchFirst(compact, /(部署|搭建|配置|优化|修复|排查|生成|改写|翻译|总结|分析|设计|开发|接入|迁移|更新|保存)/i)
+  ].filter(Boolean)
+
+  const combined = dedupeStrings(topicPatterns).join('')
+  const candidate = combined || compact
+  return trimTitleCandidate(candidate, 15)
+}
+
+function buildSimpleEnglishTitle(source: string): string {
+  const stopWords = new Set(['a', 'an', 'the', 'to', 'for', 'of', 'in', 'on', 'and', 'or', 'with', 'please', 'help', 'me', 'i', 'want', 'need', 'how', 'can', 'could', 'would', 'you'])
+  const words = source
+    .replace(/[^A-Za-z0-9#+.\s-]/g, ' ')
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word && !stopWords.has(word.toLowerCase()))
+    .slice(0, 8)
+
+  const candidate = words.length > 0 ? words.join(' ') : source.split(/\s+/).slice(0, 6).join(' ')
+  return trimTitleCandidate(candidate.replace(/\b\w/g, (char) => char.toUpperCase()), 48)
+}
+
+function matchFirst(input: string, pattern: RegExp): string {
+  return input.match(pattern)?.[1] || ''
+}
+
+function dedupeStrings(items: string[]): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const item of items) {
+    const key = item.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    result.push(item)
   }
-  return title
+  return result
+}
+
+function trimTitleCandidate(candidate: string, maxLength: number): string {
+  const title = normalizeTitleText(candidate)
+  if (!title) return ''
+  const chars = Array.from(title)
+  return chars.length > maxLength ? chars.slice(0, maxLength).join('').trim() : title
+}
+
+function isRawFirstMessageTitle(title: string, firstMessageText: string): boolean {
+  const normalizedTitle = normalizeTitleText(title).toLowerCase()
+  const normalizedSource = normalizeTitleText(firstMessageText).toLowerCase()
+  if (!normalizedTitle || !normalizedSource) return false
+  return normalizedTitle === normalizedSource || (normalizedSource.startsWith(normalizedTitle) && normalizedTitle.length >= 18)
 }
 
 function imageToDisplay(image: AIImageGenerationImage): UserAIDisplayImage | null {
@@ -257,6 +318,7 @@ function imageToDisplay(image: AIImageGenerationImage): UserAIDisplayImage | nul
 
 export const useUserAIStore = defineStore('userAi', () => {
   const appStore = useAppStore()
+  const titleUpdateInFlight = new Set<number>()
 
   const chatModelsResult = ref<{ groups: AIModelGroup[]; default_group_id?: number | null; default_model?: string }>({ groups: [] })
   const conversations = ref<AIConversation[]>([])
@@ -400,6 +462,7 @@ export const useUserAIStore = defineStore('userAi', () => {
       activeConversationId.value = nextActiveId
       syncActiveConversationSelection()
       chatLoaded.value = true
+      void repairMissingConversationTitles(conversations.value)
     } catch (err) {
       appStore.showError(extractApiErrorMessage(err, t('aiChat.loadFailed')))
     } finally {
@@ -497,8 +560,8 @@ export const useUserAIStore = defineStore('userAi', () => {
     const userContent = serializeChatContent(buildUserContent(text, images, historyReferenceImageUrls))
     const shouldGenerateTitle =
       !conversation.title_generated &&
-      (conversation.messages || []).length === 0 &&
-      isUntitledConversationTitle(conversation.title || '')
+      ((conversation.messages || []).length === 0 || isRawFirstMessageTitle(conversation.title || '', text)) &&
+      (isUntitledConversationTitle(conversation.title || '') || isRawFirstMessageTitle(conversation.title || '', text))
     const userMessage = makeLocalMessage(conversation.id, 'user', userContent, taskId, model)
     const assistantMessage = makeLocalMessage(conversation.id, 'assistant', '', taskId, model)
     assistantMessage.status = 'pending'
@@ -576,7 +639,7 @@ export const useUserAIStore = defineStore('userAi', () => {
       clearLocalMessageStatus(snapshot.conversationId, snapshot.assistantMessageId)
       await loadConversations(snapshot.conversationId, { preserveLocal: false })
       if (snapshot.shouldGenerateTitle) {
-        void generateTitleForConversation(snapshot)
+        void saveSimpleTitleForConversation(snapshot)
       }
     } catch (err) {
       if (isRequestCanceled(err)) {
@@ -601,57 +664,40 @@ export const useUserAIStore = defineStore('userAi', () => {
     }
   }
 
-  async function generateTitleForConversation(snapshot: ChatTaskSnapshot): Promise<void> {
+  async function saveSimpleTitleForConversation(snapshot: ChatTaskSnapshot): Promise<void> {
     const conversation = conversations.value.find((item) => item.id === snapshot.conversationId)
-    if (!conversation || conversation.title_generated || !isUntitledConversationTitle(conversation.title || '')) return
-    const titleSource = snapshot.titleSource.trim()
-    if (!titleSource) return
-    const selection = titleModelSelection(snapshot.groupId, snapshot.model)
-    if (!selection) return
-
-    try {
-      const rawTitle = await userAiAPI.completeChatCompletions({
-        model: selection.model,
-        group_id: selection.groupId,
-        user_ai_ephemeral: true,
-        temperature: 0.2,
-        max_tokens: 48,
-        messages: [
-          {
-            role: 'system',
-            content: '你是一个会话标题生成器。请根据用户的第一条消息，生成一个简短、自然、准确的会话标题。不要直接复制用户原话，不要加引号，不要加句号，不要解释。标题应概括用户真正想做的事情。中文输入输出中文标题，英文输入输出英文标题。标题长度尽量控制在 6 到 15 个中文字符，或 3 到 8 个英文单词。'
-          },
-          {
-            role: 'user',
-            content: `请为下面这条用户消息生成一个会话标题：\n\n${titleSource}`
-          }
-        ]
-      })
-      const title = normalizeGeneratedTitle(rawTitle, titleSource)
-      if (!title) return
-      const updated = await userAiAPI.updateConversationTitle(snapshot.conversationId, { title })
-      replaceConversation(updated)
-    } catch {
-      // Title generation is best-effort and should never affect the main chat flow.
-    }
+    if (!conversation) return
+    await saveSimpleTitle(conversation, snapshot.titleSource)
   }
 
-  function titleModelSelection(groupId: number, model: string): TitleModelSelection | null {
-    if (!isImageModel(model)) {
-      return { model, groupId }
+  async function repairMissingConversationTitles(items: AIConversation[]): Promise<void> {
+    const candidates = items.filter((conversation) => !conversation.title_generated).slice(0, 10)
+    await Promise.all(candidates.map(async (conversation) => {
+      const firstUserMessage = (conversation.messages || []).find((message) => message.id > 0 && message.role === 'user')
+      if (!firstUserMessage) return
+      const titleSource = parseMessageContent(firstUserMessage.content).text || t('aiChat.imageConversationTitle')
+      await saveSimpleTitle(conversation, titleSource)
+    }))
+  }
+
+  async function saveSimpleTitle(conversation: AIConversation, titleSourceInput: string): Promise<void> {
+    if (conversation.title_generated || titleUpdateInFlight.has(conversation.id)) return
+    const titleSource = titleSourceInput.trim()
+    if (!titleSource) return
+    if (!isUntitledConversationTitle(conversation.title || '') && !isRawFirstMessageTitle(conversation.title || '', titleSource)) return
+
+    const title = buildSimpleConversationTitle(titleSource)
+    if (!title) return
+
+    try {
+      titleUpdateInFlight.add(conversation.id)
+      const updated = await userAiAPI.updateConversationTitle(conversation.id, { title })
+      replaceConversation(updated)
+    } catch {
+      // Title saving is best-effort and should never affect the main chat flow.
+    } finally {
+      titleUpdateInFlight.delete(conversation.id)
     }
-    const sameGroup = chatModelsResult.value.groups.find((group) => group.id === groupId)
-    const sameGroupModel = sameGroup?.models.find((item) => !isImageModel(item))
-    if (sameGroupModel) {
-      return { model: sameGroupModel, groupId }
-    }
-    for (const group of chatModelsResult.value.groups) {
-      const chatModel = group.models.find((item) => !isImageModel(item))
-      if (chatModel) {
-        return { model: chatModel, groupId: group.id }
-      }
-    }
-    return null
   }
 
   function makeLocalMessage(conversationId: number, role: string, content: string, taskId: string, model: string): AIChatMessage {

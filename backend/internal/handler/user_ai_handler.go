@@ -216,17 +216,11 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 	userContent := extractLastUserMessage(body)
 	userContentForStorage := extractLastUserMessageRawContent(body)
 	conversationID := parseOptionalInt64Value(payload["conversation_id"])
-	ephemeral := parseOptionalBoolValue(payload["user_ai_ephemeral"]) ||
-		parseOptionalBoolValue(gjson.GetBytes(body, "metadata.user_ai_ephemeral").Value())
-	var resolvedConversationID int64
-	if !ephemeral {
-		conversation, err := h.userAIService.EnsureChatConversation(c.Request.Context(), subject.UserID, conversationID, &resolvedGroupID, model, userContent)
-		if err != nil {
-			response.ErrorFrom(c, err)
-			c.Abort()
-			return
-		}
-		resolvedConversationID = conversation.ID
+	conversation, err := h.userAIService.EnsureChatConversation(c.Request.Context(), subject.UserID, conversationID, &resolvedGroupID, model, userContent)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		c.Abort()
+		return
 	}
 
 	internalKey, err := h.userAIService.GetOrCreateInternalKey(c.Request.Context(), subject.UserID, &resolvedGroupID)
@@ -240,7 +234,6 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 	delete(payload, "group_id")
 	delete(payload, "group_name")
 	delete(payload, "group")
-	deleteUserAIEphemeralFields(payload)
 	rewriteUserAIRelativeImageURLs(payload, userAIRequestBaseURL(c))
 	cleanBody, err := json.Marshal(payload)
 	if err != nil {
@@ -249,13 +242,11 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 		return
 	}
 
-	if !ephemeral {
-		c.Set(userAIConversationIDContextKey, resolvedConversationID)
-		c.Set(userAIUserMessageContextKey, userContent)
-		c.Set(userAIUserContentContextKey, userContentForStorage)
-		c.Set(userAIModelContextKey, model)
-		c.Set(userAIGroupIDContextKey, resolvedGroupID)
-	}
+	c.Set(userAIConversationIDContextKey, conversation.ID)
+	c.Set(userAIUserMessageContextKey, userContent)
+	c.Set(userAIUserContentContextKey, userContentForStorage)
+	c.Set(userAIModelContextKey, model)
+	c.Set(userAIGroupIDContextKey, resolvedGroupID)
 	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
 	c.Request.Header.Del("x-api-key")
 	c.Request.Header.Del("x-goog-api-key")
@@ -343,34 +334,6 @@ func parseOptionalInt64Value(v any) int64 {
 		return n
 	default:
 		return 0
-	}
-}
-
-func parseOptionalBoolValue(v any) bool {
-	switch typed := v.(type) {
-	case bool:
-		return typed
-	case string:
-		switch strings.ToLower(strings.TrimSpace(typed)) {
-		case "1", "true", "yes", "on":
-			return true
-		default:
-			return false
-		}
-	default:
-		return false
-	}
-}
-
-func deleteUserAIEphemeralFields(payload map[string]any) {
-	delete(payload, "user_ai_ephemeral")
-	metadata, ok := payload["metadata"].(map[string]any)
-	if !ok {
-		return
-	}
-	delete(metadata, "user_ai_ephemeral")
-	if len(metadata) == 0 {
-		delete(payload, "metadata")
 	}
 }
 

@@ -117,10 +117,6 @@ export interface StreamChatCompletionPayload {
   conversation_id?: number | null
   messages: ChatCompletionMessage[]
   stream?: boolean
-  temperature?: number
-  max_tokens?: number
-  metadata?: Record<string, unknown>
-  user_ai_ephemeral?: boolean
 }
 
 export interface StreamChatCompletionOptions {
@@ -494,33 +490,5 @@ export const userAiAPI = {
     }
 
     return fullText
-  },
-
-  async completeChatCompletions(
-    payload: StreamChatCompletionPayload,
-    options: StreamChatCompletionOptions = {}
-  ): Promise<string> {
-    const response = await fetch(`${API_BASE_URL}/user/chat/completions`, {
-      method: 'POST',
-      credentials: 'include',
-      headers: authHeaders('application/json'),
-      body: JSON.stringify({ ...payload, stream: false }),
-      signal: options.signal
-    })
-
-    if (!response.ok) {
-      throw new Error(await readErrorMessage(response))
-    }
-
-    const text = await response.text()
-    if (!text) return ''
-    try {
-      const content = extractAssistantContent(JSON.parse(text))
-      if (content) options.onDelta?.(content)
-      return content
-    } catch {
-      options.onDelta?.(text)
-      return text
-    }
   }
 }
