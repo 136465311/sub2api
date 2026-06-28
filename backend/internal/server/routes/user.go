@@ -50,6 +50,7 @@ func RegisterUserRoutes(
 			{
 				chat.GET("/conversations", h.UserAI.ListChatConversations)
 				chat.POST("/conversations", h.UserAI.CreateChatConversation)
+				chat.PATCH("/conversations/:id/title", h.UserAI.UpdateChatConversationTitle)
 				chat.DELETE("/conversations/:id", h.UserAI.DeleteChatConversation)
 			}
 

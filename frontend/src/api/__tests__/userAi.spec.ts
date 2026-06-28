@@ -1,20 +1,36 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const post = vi.hoisted(() => vi.fn())
+const patch = vi.hoisted(() => vi.fn())
 
 vi.mock('@/api/client', () => ({
   apiClient: {
     post,
+    patch,
   },
 }))
 
 describe('user AI image API', () => {
   beforeEach(() => {
     post.mockReset()
+    patch.mockReset()
     post.mockResolvedValue({
       data: {
         created: 1712345678,
         data: [],
+      },
+    })
+    patch.mockResolvedValue({
+      data: {
+        id: 42,
+        user_id: 7,
+        group_id: 12,
+        title: '首尔服务器部署',
+        title_generated: true,
+        model: 'gpt-4o',
+        created_at: '2026-06-28T00:00:00Z',
+        updated_at: '2026-06-28T00:00:00Z',
+        messages: [],
       },
     })
   })
@@ -38,5 +54,15 @@ describe('user AI image API', () => {
       signal: abortController.signal,
     })
     expect(post).not.toHaveBeenCalledWith('/user/images/edit', expect.anything(), expect.anything())
+  })
+
+  it('updates generated conversation titles through the title endpoint', async () => {
+    const { userAiAPI } = await import('@/api/userAi')
+
+    const updated = await userAiAPI.updateConversationTitle(42, { title: '首尔服务器部署' })
+
+    expect(patch).toHaveBeenCalledWith('/user/chat/conversations/42/title', { title: '首尔服务器部署' })
+    expect(updated.title).toBe('首尔服务器部署')
+    expect(updated.title_generated).toBe(true)
   })
 })

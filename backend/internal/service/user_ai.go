@@ -21,25 +21,26 @@ var (
 )
 
 type ChatConversation struct {
-	ID        int64
-	UserID    int64
-	GroupID   *int64
-	Title     string
-	Model     string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	Messages  []ChatMessage
+	ID             int64         `json:"id"`
+	UserID         int64         `json:"user_id"`
+	GroupID        *int64        `json:"group_id,omitempty"`
+	Title          string        `json:"title"`
+	TitleGenerated bool          `json:"title_generated"`
+	Model          string        `json:"model"`
+	CreatedAt      time.Time     `json:"created_at"`
+	UpdatedAt      time.Time     `json:"updated_at"`
+	Messages       []ChatMessage `json:"messages"`
 }
 
 type ChatMessage struct {
-	ID             int64
-	ConversationID int64
-	UserID         int64
-	Role           string
-	Content        string
-	Model          string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID             int64     `json:"id"`
+	ConversationID int64     `json:"conversation_id"`
+	UserID         int64     `json:"user_id"`
+	Role           string    `json:"role"`
+	Content        string    `json:"content"`
+	Model          string    `json:"model"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type AIModelGroup struct {
@@ -95,6 +96,12 @@ type ChatConversationCreateInput struct {
 	Model   string
 }
 
+type ChatConversationTitleUpdateInput struct {
+	UserID         int64
+	ConversationID int64
+	Title          string
+}
+
 type ChatMessageCreateInput struct {
 	ConversationID int64
 	UserID         int64
@@ -107,6 +114,7 @@ type UserAIRepository interface {
 	ListChatConversations(ctx context.Context, userID int64, params pagination.PaginationParams, messagesLimit int) ([]ChatConversation, *pagination.PaginationResult, error)
 	GetChatConversation(ctx context.Context, userID, conversationID int64) (*ChatConversation, error)
 	CreateChatConversation(ctx context.Context, input ChatConversationCreateInput) (*ChatConversation, error)
+	UpdateChatConversationTitle(ctx context.Context, input ChatConversationTitleUpdateInput) (*ChatConversation, error)
 	DeleteChatConversation(ctx context.Context, userID, conversationID int64) error
 	CreateChatMessage(ctx context.Context, input ChatMessageCreateInput) (*ChatMessage, error)
 	UpdateChatConversationAfterMessage(ctx context.Context, userID, conversationID int64, title, model string, groupID *int64) error
@@ -254,6 +262,11 @@ func (s *UserAIService) CreateChatConversation(ctx context.Context, input ChatCo
 	input.Title = normalizeConversationTitle(input.Title)
 	input.Model = strings.TrimSpace(input.Model)
 	return s.repo.CreateChatConversation(ctx, input)
+}
+
+func (s *UserAIService) UpdateChatConversationTitle(ctx context.Context, input ChatConversationTitleUpdateInput) (*ChatConversation, error) {
+	input.Title = normalizeConversationTitle(input.Title)
+	return s.repo.UpdateChatConversationTitle(ctx, input)
 }
 
 func (s *UserAIService) DeleteChatConversation(ctx context.Context, userID, conversationID int64) error {

@@ -475,8 +475,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { storeToRefs } from 'pinia'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -488,37 +489,43 @@ import {
   userAiAPI,
   type AIConversation,
   type AIChatMessage,
-  type AIModelGroup,
-  type ChatCompletionMessage,
   type ChatMessageContent
 } from '@/api/userAi'
+import { useUserAIStore, type SelectedAIChatImage } from '@/stores/userAi'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { formatRelativeTime } from '@/utils/format'
 
 const { t } = useI18n()
 const appStore = useAppStore()
+const userAIStore = useUserAIStore()
+const {
+  conversations,
+  activeConversationId,
+  selectedGroupId,
+  selectedModel,
+  loadingModels,
+  loadingConversations,
+  sending,
+  imageContinuationHint,
+  selectedGroup,
+  groupOptions,
+  modelOptions,
+  activeConversation,
+  activeMessages,
+  canCreateConversation,
+  isSelectedImageModel
+} = storeToRefs(userAIStore)
 
-const modelsResult = ref<{ groups: AIModelGroup[]; default_group_id?: number | null; default_model?: string }>({ groups: [] })
-const conversations = ref<AIConversation[]>([])
-const activeConversationId = ref<number | null>(null)
-const selectedGroupId = ref<number | null>(null)
-const selectedModel = ref<string>('')
 const draft = ref('')
 const selectedImages = ref<SelectedImage[]>([])
-const imageContinuationHint = ref('')
-const loadingModels = ref(false)
-const loadingConversations = ref(false)
-const sending = ref(false)
 const imageUploading = ref(false)
 const pendingDeleteId = ref<number | null>(null)
-const abortController = ref<AbortController | null>(null)
 const messagesContainerRef = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLTextAreaElement | null>(null)
 const imageInputRef = ref<HTMLInputElement | null>(null)
 const mobileConversationsOpen = ref(false)
 const previewImageUrl = ref('')
 const previewImageAlt = ref('')
-let tempMessageId = -1
 let selectedImageId = 1
 
 const maxSelectedImages = 3
@@ -528,7 +535,7 @@ const maxImageDimension = 1600
 const imageJPEGQuality = 0.82
 const allowedImageTypes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 
-interface SelectedImage {
+interface SelectedImage extends SelectedAIChatImage {
   id: number
   name: string
   type: string
@@ -551,34 +558,6 @@ const selectedGroupIdValue = computed({
     selectedGroupId.value = typeof value === 'number' ? value : value ? Number(value) : null
   }
 })
-
-const selectedGroup = computed(() => {
-  return modelsResult.value.groups.find((group) => group.id === selectedGroupId.value) || null
-})
-
-const groupOptions = computed(() =>
-  modelsResult.value.groups.map((group) => ({
-    value: group.id,
-    label: group.name,
-    platform: group.platform
-  }))
-)
-
-const modelOptions = computed(() =>
-  (selectedGroup.value?.models || []).map((model) => ({
-    value: model,
-    label: model
-  }))
-)
-
-const activeConversation = computed(() => {
-  return conversations.value.find((item) => item.id === activeConversationId.value) || null
-})
-
-const activeMessages = computed(() => activeConversation.value?.messages || [])
-
-const canCreateConversation = computed(() => Boolean(selectedModel.value && selectedGroupId.value))
-const isSelectedImageModel = computed(() => isImageModel(selectedModel.value))
 
 const canSend = computed(() => {
   if (isSelectedImageModel.value) {
@@ -606,84 +585,33 @@ watch(selectedGroupId, () => {
   }
 })
 
-watch(activeConversationId, () => {
-  syncActiveConversationSelection()
-})
-
 onMounted(async () => {
-  await Promise.all([loadModels(), loadConversations()])
+  await userAIStore.initializeChat()
 })
 
-onBeforeUnmount(() => {
-  stopStreaming()
+watch(activeMessages, () => {
+  void scrollToBottom()
+}, {
+  deep: true
 })
-
-async function loadModels(): Promise<void> {
-  loadingModels.value = true
-  try {
-    const result = await userAiAPI.getChatModelsWithImages()
-    modelsResult.value = {
-      groups: result.groups || [],
-      default_group_id: result.default_group_id,
-      default_model: result.default_model
-    }
-
-    const defaultGroup = result.default_group_id ?? result.groups?.[0]?.id ?? null
-    applyAvailableModelSelection(activeConversation.value, defaultGroup, result.default_model || '')
-  } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('aiChat.loadFailed')))
-  } finally {
-    loadingModels.value = false
-  }
-}
 
 async function loadConversations(preferredId?: number | null): Promise<void> {
-  loadingConversations.value = true
-  try {
-    const result = await userAiAPI.listConversations(1, 50)
-    conversations.value = result.items || []
-    const nextActiveId =
-      preferredId && conversations.value.some((item) => item.id === preferredId)
-        ? preferredId
-        : conversations.value[0]?.id ?? null
-    activeConversationId.value = nextActiveId
-    syncActiveConversationSelection()
-    await scrollToBottom()
-  } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('aiChat.loadFailed')))
-  } finally {
-    loadingConversations.value = false
-  }
+  await userAIStore.loadConversations(preferredId, { preserveLocal: sending.value })
+  await scrollToBottom()
 }
 
 async function startNewConversation(): Promise<void> {
-  const conversation = await createConversation(t('aiChat.untitled'))
+  const conversation = await userAIStore.startNewConversation()
   if (!conversation) return
-  conversations.value = [conversation, ...conversations.value.filter((item) => item.id !== conversation.id)]
-  activeConversationId.value = conversation.id
   mobileConversationsOpen.value = false
   await nextTick()
   inputRef.value?.focus()
 }
 
-async function createConversation(title: string): Promise<AIConversation | null> {
-  if (!selectedGroupId.value || !selectedModel.value) return null
-  try {
-    return await userAiAPI.createConversation({
-      title,
-      model: selectedModel.value,
-      group_id: selectedGroupId.value
-    })
-  } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('aiChat.loadFailed')))
-    return null
-  }
-}
-
 function selectConversation(id: number): void {
-  if (sending.value) return
-  activeConversationId.value = id
-  mobileConversationsOpen.value = false
+  if (userAIStore.selectConversation(id)) {
+    mobileConversationsOpen.value = false
+  }
 }
 
 function requestDeleteConversation(id: number): void {
@@ -694,14 +622,7 @@ async function confirmDeleteConversation(): Promise<void> {
   if (!pendingDeleteId.value) return
   const deleteId = pendingDeleteId.value
   try {
-    if (deleteId === activeConversationId.value) {
-      stopStreaming()
-    }
-    await userAiAPI.deleteConversation(deleteId)
-    conversations.value = conversations.value.filter((item) => item.id !== deleteId)
-    if (activeConversationId.value === deleteId) {
-      activeConversationId.value = conversations.value[0]?.id ?? null
-    }
+    await userAIStore.deleteConversation(deleteId)
   } catch (err) {
     appStore.showError(extractApiErrorMessage(err, t('aiChat.deleteFailed')))
   } finally {
@@ -715,267 +636,18 @@ async function sendMessage(): Promise<void> {
   if ((!text && images.length === 0) || !selectedModel.value || !selectedGroupId.value || sending.value) return
   if (isImageModel(selectedModel.value) && !text) return
 
-  const titleSeed = text || t('aiChat.imageConversationTitle')
-  const conversation = activeConversation.value || (await createConversation(titleSeed))
-  if (!conversation) return
-
-  if (!activeConversation.value) {
-    conversations.value = [conversation, ...conversations.value]
-    activeConversationId.value = conversation.id
-  }
-
+  const started = await userAIStore.sendMessage(text, images)
+  if (!started) return
   draft.value = ''
   selectedImages.value = []
   resetImageInput()
-  sending.value = true
-  abortController.value = new AbortController()
-
-  const historyReferenceImageUrls =
-    isImageModel(selectedModel.value) && images.length === 0
-      ? latestImageModelReferenceUrls(conversation.id)
-      : []
-  if (historyReferenceImageUrls.length > 0) {
-    imageContinuationHint.value = t('aiChat.continuingImageEdit')
-    appStore.showInfo(t('aiChat.continuingImageEdit'))
-  }
-  const userContent = serializeChatContent(buildUserContent(text, images, historyReferenceImageUrls))
-  const userMessage = makeLocalMessage(conversation.id, 'user', userContent)
-  const assistantMessage = makeLocalMessage(conversation.id, 'assistant', '')
-  appendLocalMessages(conversation.id, [userMessage, assistantMessage])
+  await nextTick()
+  inputRef.value?.focus()
   await scrollToBottom()
-
-  try {
-    if (isImageModel(selectedModel.value)) {
-      const imagePayload = {
-        prompt: text,
-        model: selectedModel.value,
-        group_id: selectedGroupId.value,
-        conversation_id: conversation.id
-      }
-      const result = images.length > 0
-        ? await userAiAPI.editImages(
-          {
-            ...imagePayload,
-            image_urls: images.map((image) => image.imageUrl)
-          },
-          {
-            signal: abortController.value.signal
-          }
-        )
-        : await userAiAPI.generateImages(
-          imagePayload,
-          {
-            signal: abortController.value.signal
-          }
-        )
-      const assistantImageContent = buildAssistantImageContent(result.data)
-      if (assistantImageContent.length === 0) {
-        throw new Error(t('aiImage.generateFailed'))
-      }
-      updateLocalMessageContent(conversation.id, assistantMessage.id, serializeChatContent(assistantImageContent))
-      await scrollToBottom()
-    } else {
-      const requestMessages = buildRequestMessages(conversation.id, userMessage)
-      const streamedContent = await userAiAPI.streamChatCompletions(
-        {
-          model: selectedModel.value,
-          group_id: selectedGroupId.value,
-          conversation_id: conversation.id,
-          messages: requestMessages,
-          stream: true
-        },
-        {
-          signal: abortController.value.signal,
-          onDelta: async (delta) => {
-            appendAssistantDelta(conversation.id, assistantMessage.id, delta)
-            await scrollToBottom()
-          }
-        }
-      )
-      if (!getLocalMessageContent(conversation.id, assistantMessage.id) && streamedContent) {
-        updateLocalMessageContent(conversation.id, assistantMessage.id, streamedContent)
-        await scrollToBottom()
-      }
-    }
-    await loadConversations(conversation.id)
-  } catch (err) {
-    if (!isRequestCanceled(err)) {
-      await loadConversations(conversation.id)
-      if (!hasSavedAssistantReply(conversation.id, userContent)) {
-        removeLocalMessage(conversation.id, assistantMessage.id)
-        appStore.showError(extractApiErrorMessage(err, t('aiChat.sendFailed')))
-      }
-    }
-  } finally {
-    sending.value = false
-    abortController.value = null
-    imageContinuationHint.value = ''
-    await nextTick()
-    inputRef.value?.focus()
-  }
-}
-
-function isRequestCanceled(err: unknown): boolean {
-  const record = err as { name?: string; code?: string }
-  return record?.name === 'AbortError' || record?.name === 'CanceledError' || record?.code === 'ERR_CANCELED'
 }
 
 function stopStreaming(): void {
-  abortController.value?.abort()
-  abortController.value = null
-  sending.value = false
-}
-
-function makeLocalMessage(conversationId: number, role: string, content: string): AIChatMessage {
-  return {
-    id: tempMessageId--,
-    conversation_id: conversationId,
-    user_id: 0,
-    role,
-    content,
-    model: selectedModel.value,
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString()
-  }
-}
-
-function appendLocalMessages(conversationId: number, messages: AIChatMessage[]): void {
-  const conversation = conversations.value.find((item) => item.id === conversationId)
-  if (!conversation) return
-  conversation.messages = [...conversation.messages, ...messages]
-  conversation.updated_at = new Date().toISOString()
-}
-
-function removeLocalMessage(conversationId: number, messageId: number): void {
-  const conversation = conversations.value.find((item) => item.id === conversationId)
-  if (!conversation) return
-  conversation.messages = conversation.messages.filter((item) => item.id !== messageId)
-}
-
-function findLocalMessage(conversationId: number, messageId: number): AIChatMessage | null {
-  const conversation = conversations.value.find((item) => item.id === conversationId)
-  return conversation?.messages.find((item) => item.id === messageId) || null
-}
-
-function getLocalMessageContent(conversationId: number, messageId: number): string {
-  return findLocalMessage(conversationId, messageId)?.content || ''
-}
-
-function updateLocalMessageContent(conversationId: number, messageId: number, content: string): void {
-  const message = findLocalMessage(conversationId, messageId)
-  if (message) {
-    message.content = content
-  }
-}
-
-function appendAssistantDelta(conversationId: number, messageId: number, delta: string): void {
-  const message = findLocalMessage(conversationId, messageId)
-  if (message) {
-    message.content = `${message.content || ''}${delta}`
-  }
-}
-
-function hasSavedAssistantReply(conversationId: number, userContent: string): boolean {
-  const conversation = conversations.value.find((item) => item.id === conversationId)
-  const messages = conversation?.messages || []
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]
-    if (message.role !== 'user' || message.content.trim() !== userContent.trim()) continue
-    return messages.slice(i + 1).some((item) => item.role === 'assistant' && Boolean(item.content.trim()))
-  }
-  return false
-}
-
-function buildRequestMessages(conversationId: number, userMessage: AIChatMessage): ChatCompletionMessage[] {
-  const conversation = conversations.value.find((item) => item.id === conversationId)
-  const persistedMessages = (conversation?.messages || [])
-    .filter((message) => message.id > 0 || message.id === userMessage.id)
-    .filter((message) => {
-      if (!['system', 'user', 'assistant'].includes(message.role)) return false
-      return messageRequestContent(message) !== null
-    })
-    .map((message) => ({
-      role: message.role as 'system' | 'user' | 'assistant',
-      content: messageRequestContent(message) as ChatMessageContent
-    }))
-  return persistedMessages
-}
-
-function messageRequestContent(message: AIChatMessage): ChatMessageContent | null {
-  const parsed = parseMessageContent(message.content)
-  if (!parsed.hasContent) return null
-  if (message.role === 'assistant' && parsed.imageUrls.length > 0) {
-    return null
-  }
-  return parsed.requestContent
-}
-
-function buildAssistantImageContent(images: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>): Exclude<ChatMessageContent, string> {
-  const content: Exclude<ChatMessageContent, string> = []
-  for (const image of images) {
-    const imageUrl = String(image.url || (image.b64_json ? `data:image/png;base64,${image.b64_json}` : '')).trim()
-    if (!imageUrl) continue
-    content.push({
-      type: 'image_url',
-      image_url: {
-        url: imageUrl
-      }
-    })
-    const revisedPrompt = String(image.revised_prompt || '').trim()
-    if (revisedPrompt) {
-      content.push({ type: 'text', text: revisedPrompt })
-    }
-  }
-  return content
-}
-
-function syncActiveConversationSelection(): void {
-  applyAvailableModelSelection(activeConversation.value, modelsResult.value.default_group_id ?? modelsResult.value.groups[0]?.id ?? null, modelsResult.value.default_model || '')
-}
-
-function applyAvailableModelSelection(
-  conversation: AIConversation | null,
-  defaultGroupId: number | null,
-  defaultModel: string
-): void {
-  const groups = modelsResult.value.groups || []
-  if (groups.length === 0) {
-    selectedGroupId.value = null
-    selectedModel.value = ''
-    return
-  }
-
-  const conversationGroup = conversation?.group_id
-  const preferredGroupId =
-    conversationGroup && groups.some((group) => group.id === conversationGroup)
-      ? conversationGroup
-      : selectedGroupId.value && groups.some((group) => group.id === selectedGroupId.value)
-        ? selectedGroupId.value
-        : defaultGroupId && groups.some((group) => group.id === defaultGroupId)
-          ? defaultGroupId
-          : groups[0]?.id ?? null
-
-  selectedGroupId.value = preferredGroupId
-
-  const models = groups.find((group) => group.id === preferredGroupId)?.models || []
-  if (models.length === 0) {
-    selectedModel.value = ''
-    return
-  }
-
-  const conversationModel = conversation?.model || ''
-  if (conversationModel && models.includes(conversationModel)) {
-    selectedModel.value = conversationModel
-    return
-  }
-  if (selectedModel.value && models.includes(selectedModel.value)) {
-    return
-  }
-  if (defaultModel && models.includes(defaultModel)) {
-    selectedModel.value = defaultModel
-    return
-  }
-  selectedModel.value = models[0] || ''
+  userAIStore.stopStreaming()
 }
 
 function openImagePreview(url: string, alt: string): void {
@@ -1148,54 +820,6 @@ function canvasToJPEGBlob(canvas: HTMLCanvasElement, quality: number): Promise<B
       quality
     )
   })
-}
-
-function buildUserContent(text: string, images: SelectedImage[], referenceImageUrls: string[] = []): ChatMessageContent {
-  if (images.length === 0 && referenceImageUrls.length === 0) {
-    return text
-  }
-
-  const content: ChatMessageContent = []
-  if (text) {
-    content.push({ type: 'text', text })
-  }
-  for (const imageUrl of referenceImageUrls) {
-    content.push({
-      type: 'image_url',
-      image_url: {
-        url: imageUrl
-      }
-    })
-  }
-  for (const image of images) {
-    content.push({
-      type: 'image_url',
-      image_url: {
-        url: image.imageUrl
-      }
-    })
-  }
-  return content
-}
-
-function latestImageModelReferenceUrls(conversationId: number): string[] {
-  const conversation = conversations.value.find((item) => item.id === conversationId)
-  const messages = conversation?.messages || []
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role !== 'assistant') continue
-    const imageUrls = messageImageUrls(messages[i]).filter(isHostedUserAIImageUrl)
-    if (imageUrls.length > 0) return imageUrls.slice(0, maxSelectedImages)
-  }
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role !== 'user') continue
-    const imageUrls = messageImageUrls(messages[i]).filter(isHostedUserAIImageUrl)
-    if (imageUrls.length > 0) return imageUrls.slice(0, maxSelectedImages)
-  }
-  return []
-}
-
-function serializeChatContent(content: ChatMessageContent): string {
-  return typeof content === 'string' ? content : JSON.stringify(content)
 }
 
 function messageText(message: AIChatMessage): string {

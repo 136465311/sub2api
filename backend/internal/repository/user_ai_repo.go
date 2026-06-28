@@ -31,7 +31,7 @@ func (r *userAIRepository) ListChatConversations(ctx context.Context, userID int
 	}
 
 	rows, err := r.sql.QueryContext(ctx, `
-		SELECT id, user_id, group_id, title, model, created_at, updated_at
+		SELECT id, user_id, group_id, title, title_generated, model, created_at, updated_at
 		FROM chat_conversations
 		WHERE user_id = $1 AND deleted_at IS NULL
 		ORDER BY updated_at DESC, id DESC
@@ -72,7 +72,7 @@ func (r *userAIRepository) ListChatConversations(ctx context.Context, userID int
 func (r *userAIRepository) GetChatConversation(ctx context.Context, userID, conversationID int64) (*service.ChatConversation, error) {
 	var conversation service.ChatConversation
 	if err := scanSingleRow(ctx, r.sql, `
-		SELECT id, user_id, group_id, title, model, created_at, updated_at
+		SELECT id, user_id, group_id, title, title_generated, model, created_at, updated_at
 		FROM chat_conversations
 		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
 	`, []any{conversationID, userID},
@@ -80,6 +80,7 @@ func (r *userAIRepository) GetChatConversation(ctx context.Context, userID, conv
 		&conversation.UserID,
 		&conversation.GroupID,
 		&conversation.Title,
+		&conversation.TitleGenerated,
 		&conversation.Model,
 		&conversation.CreatedAt,
 		&conversation.UpdatedAt,
@@ -102,18 +103,50 @@ func (r *userAIRepository) CreateChatConversation(ctx context.Context, input ser
 	if err := scanSingleRow(ctx, r.sql, `
 		INSERT INTO chat_conversations (user_id, group_id, title, model)
 		VALUES ($1, $2, $3, $4)
-		RETURNING id, user_id, group_id, title, model, created_at, updated_at
+		RETURNING id, user_id, group_id, title, title_generated, model, created_at, updated_at
 	`, []any{input.UserID, input.GroupID, input.Title, input.Model},
 		&conversation.ID,
 		&conversation.UserID,
 		&conversation.GroupID,
 		&conversation.Title,
+		&conversation.TitleGenerated,
 		&conversation.Model,
 		&conversation.CreatedAt,
 		&conversation.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
+	return &conversation, nil
+}
+
+func (r *userAIRepository) UpdateChatConversationTitle(ctx context.Context, input service.ChatConversationTitleUpdateInput) (*service.ChatConversation, error) {
+	var conversation service.ChatConversation
+	if err := scanSingleRow(ctx, r.sql, `
+		UPDATE chat_conversations
+		SET title = $3, title_generated = TRUE
+		WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL AND title_generated = FALSE
+		RETURNING id, user_id, group_id, title, title_generated, model, created_at, updated_at
+	`, []any{input.ConversationID, input.UserID, input.Title},
+		&conversation.ID,
+		&conversation.UserID,
+		&conversation.GroupID,
+		&conversation.Title,
+		&conversation.TitleGenerated,
+		&conversation.Model,
+		&conversation.CreatedAt,
+		&conversation.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return r.GetChatConversation(ctx, input.UserID, input.ConversationID)
+		}
+		return nil, err
+	}
+
+	messages, err := r.listMessages(ctx, input.UserID, input.ConversationID, 100)
+	if err != nil {
+		return nil, err
+	}
+	conversation.Messages = messages
 	return &conversation, nil
 }
 
@@ -168,7 +201,7 @@ func (r *userAIRepository) UpdateChatConversationAfterMessage(ctx context.Contex
 	res, err := r.sql.ExecContext(ctx, `
 		UPDATE chat_conversations
 		SET
-			title = CASE WHEN title = '' OR title = '新会话' THEN $3 ELSE title END,
+			title = CASE WHEN title = '' THEN $3 ELSE title END,
 			model = CASE WHEN $4 <> '' THEN $4 ELSE model END,
 			group_id = COALESCE($5, group_id),
 			updated_at = NOW()
@@ -312,6 +345,7 @@ func scanChatConversation(scanner chatConversationScanner) (service.ChatConversa
 		&conversation.UserID,
 		&groupID,
 		&conversation.Title,
+		&conversation.TitleGenerated,
 		&conversation.Model,
 		&createdAt,
 		&updatedAt,

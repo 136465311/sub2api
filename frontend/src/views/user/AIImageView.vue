@@ -102,6 +102,11 @@
             </div>
           </div>
 
+          <div v-else-if="imageError" class="empty-state result-error">
+            <Icon name="x" size="xl" />
+            <span>{{ imageError }}</span>
+          </div>
+
           <div v-else-if="latestImages.length" class="result-grid">
             <article
               v-for="(image, index) in latestImages"
@@ -208,58 +213,40 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { storeToRefs } from 'pinia'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import Icon from '@/components/icons/Icon.vue'
 import Select from '@/components/common/Select.vue'
-import { useAppStore } from '@/stores/app'
-import { extractApiErrorMessage } from '@/utils/apiError'
+import { useUserAIStore, type UserAIImageSize } from '@/stores/userAi'
 import { formatRelativeTime } from '@/utils/format'
-import {
-  userAiAPI,
-  type AIImageGenerationImage,
-  type AIImageHistoryItem,
-  type AIModelGroup
-} from '@/api/userAi'
-
-type ImageSize = '1:1' | '16:9' | '9:16'
-
-interface FlatModelOption {
-  value: string
-  label: string
-  groupId: number
-  groupName: string
-  model: string
-  [key: string]: unknown
-}
-
-interface DisplayImage {
-  url: string
-  revisedPrompt: string
-}
 
 const { t } = useI18n()
-const appStore = useAppStore()
+const userAIStore = useUserAIStore()
+const {
+  imagePrompt: prompt,
+  imageSelectedModelKey: selectedModelKey,
+  imageSelectedSize: selectedSize,
+  imageSelectedCount: selectedCount,
+  imageLoadingModels: loadingModels,
+  imageGenerating: generating,
+  latestImages,
+  latestCreatedAt,
+  imageHistory: history,
+  imageHistoryTotal: historyTotal,
+  imageHistoryLoading: historyLoading,
+  imageHistoryLoadingMore: historyLoadingMore,
+  imageError,
+  imageModelOptions: modelOptions,
+  imageSelectedModelLabel: selectedModelLabel,
+  imageSelectedCountNumber: selectedCountNumber,
+  canGenerateImage: canGenerate,
+  hasMoreImageHistory: hasMoreHistory
+} = storeToRefs(userAIStore)
 
-const prompt = ref('')
-const selectedModelKey = ref<string | null>(null)
-const selectedSize = ref<ImageSize>('1:1')
-const selectedCount = ref<number>(1)
-const groups = ref<AIModelGroup[]>([])
-const defaultGroupId = ref<number | null>(null)
-const defaultModel = ref('')
-const loadingModels = ref(false)
-const generating = ref(false)
-const latestImages = ref<DisplayImage[]>([])
-const latestCreatedAt = ref('')
-const history = ref<AIImageHistoryItem[]>([])
-const historyPage = ref(1)
-const historyTotal = ref(0)
-const historyLoading = ref(false)
-const historyLoadingMore = ref(false)
-
-const sizeOptions: Array<{ value: ImageSize; label: string; markClass: string }> = [
+const sizeOptions: Array<{ value: UserAIImageSize; label: string; markClass: string }> = [
+  { value: 'auto', label: t('aiImage.sizeAuto'), markClass: 'ratio-auto' },
   { value: '1:1', label: t('aiImage.sizeSquare'), markClass: 'ratio-square' },
   { value: '16:9', label: t('aiImage.sizeLandscape'), markClass: 'ratio-landscape' },
   { value: '9:16', label: t('aiImage.sizePortrait'), markClass: 'ratio-portrait' }
@@ -272,120 +259,20 @@ const countOptions = computed(() => [
   { value: 4, label: t('aiImage.n4') }
 ])
 
-const modelOptions = computed<FlatModelOption[]>(() =>
-  groups.value.flatMap((group) =>
-    (group.models || []).map((model) => ({
-      value: `${group.id}:${model}`,
-      label: `${model} / ${group.name}`,
-      groupId: group.id,
-      groupName: group.name,
-      model
-    }))
-  )
-)
-
-const selectedModelOption = computed(() =>
-  modelOptions.value.find((item) => item.value === selectedModelKey.value) || null
-)
-
-const selectedModelLabel = computed(() => selectedModelOption.value?.label || '')
-
-const selectedCountNumber = computed(() => {
-  const value = Number(selectedCount.value)
-  return Number.isFinite(value) && value > 0 ? Math.min(4, Math.floor(value)) : 1
-})
-
-const canGenerate = computed(() =>
-  Boolean(prompt.value.trim() && selectedModelOption.value && !generating.value)
-)
-
-const hasMoreHistory = computed(() => history.value.length < historyTotal.value)
-
-watch(modelOptions, (options) => {
-  if (options.length === 0) {
-    selectedModelKey.value = null
-    return
-  }
-  if (selectedModelKey.value && options.some((item) => item.value === selectedModelKey.value)) {
-    return
-  }
-  const preferred = options.find((item) => item.groupId === defaultGroupId.value && item.model === defaultModel.value)
-  selectedModelKey.value = (preferred || options[0]).value
-})
-
 onMounted(() => {
-  void loadModels()
-  void loadHistory(true)
+  void userAIStore.initializeImage()
 })
 
 async function loadModels(): Promise<void> {
-  loadingModels.value = true
-  try {
-    const result = await userAiAPI.getImageModels()
-    groups.value = result.groups || []
-    defaultGroupId.value = result.default_group_id ?? null
-    defaultModel.value = result.default_model || ''
-  } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('aiImage.loadFailed')))
-  } finally {
-    loadingModels.value = false
-  }
+  await userAIStore.loadImageModels()
 }
 
 async function loadHistory(reset: boolean): Promise<void> {
-  if (reset) {
-    historyLoading.value = true
-    historyPage.value = 1
-  } else {
-    historyLoadingMore.value = true
-  }
-
-  try {
-    const page = reset ? 1 : historyPage.value + 1
-    const result = await userAiAPI.listImageHistory(page, 20)
-    history.value = reset ? result.items : [...history.value, ...result.items]
-    historyPage.value = result.page
-    historyTotal.value = result.total
-  } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('aiImage.loadFailed')))
-  } finally {
-    historyLoading.value = false
-    historyLoadingMore.value = false
-  }
+  await userAIStore.loadImageHistory(reset)
 }
 
 async function generateImages(): Promise<void> {
-  if (!canGenerate.value || !selectedModelOption.value) return
-
-  generating.value = true
-  try {
-    const selection = selectedModelOption.value
-    const result = await userAiAPI.generateImages({
-      prompt: prompt.value.trim(),
-      model: selection.model,
-      group_id: selection.groupId,
-      size: selectedSize.value,
-      n: selectedCountNumber.value
-    })
-
-    latestImages.value = result.data.map(imageToDisplay).filter((item): item is DisplayImage => Boolean(item))
-    latestCreatedAt.value = result.created > 0 ? new Date(result.created * 1000).toISOString() : new Date().toISOString()
-    appStore.showSuccess(t('aiImage.generateSuccess'))
-    void loadHistory(true)
-  } catch (err) {
-    appStore.showError(extractApiErrorMessage(err, t('aiImage.generateFailed')))
-  } finally {
-    generating.value = false
-  }
-}
-
-function imageToDisplay(image: AIImageGenerationImage): DisplayImage | null {
-  const url = image.url || (image.b64_json ? `data:image/png;base64,${image.b64_json}` : '')
-  if (!url) return null
-  return {
-    url,
-    revisedPrompt: image.revised_prompt || ''
-  }
+  userAIStore.generateImages()
 }
 
 function ratioClassFromSize(size: string): string {
@@ -397,6 +284,7 @@ function ratioClassFromSize(size: string): string {
 
 function displaySize(size: string): string {
   const normalized = String(size || '').toLowerCase()
+  if (normalized === 'auto') return t('aiImage.sizeAuto')
   if (normalized.includes('2048x1152')) return t('aiImage.sizeLandscape')
   if (normalized.includes('1152x2048')) return t('aiImage.sizePortrait')
   return t('aiImage.sizeSquare')
@@ -611,6 +499,12 @@ function fileExtensionFromImageURL(url: string): string {
   border-radius: 0.1875rem;
 }
 
+.ratio-auto {
+  height: 0.875rem;
+  width: 1rem;
+  border-style: dashed;
+}
+
 .ratio-square {
   height: 0.875rem;
   width: 0.875rem;
@@ -770,6 +664,16 @@ function fileExtensionFromImageURL(url: string): string {
 .dark .empty-state {
   border-color: rgb(51 65 85);
   color: rgb(148 163 184);
+}
+
+.result-error {
+  border-color: rgb(252 165 165);
+  color: rgb(185 28 28);
+}
+
+.dark .result-error {
+  border-color: rgb(127 29 29 / 0.65);
+  color: rgb(248 113 113);
 }
 
 .history-section {

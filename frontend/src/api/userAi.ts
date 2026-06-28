@@ -65,6 +65,9 @@ export interface AIChatMessage {
   model: string
   created_at: string
   updated_at: string
+  status?: 'pending' | 'failed'
+  error?: string
+  task_id?: string
 }
 
 export interface AIConversation {
@@ -72,6 +75,7 @@ export interface AIConversation {
   user_id: number
   group_id: number | null
   title: string
+  title_generated: boolean
   model: string
   created_at: string
   updated_at: string
@@ -82,6 +86,10 @@ export interface CreateConversationPayload {
   title?: string
   model?: string
   group_id?: number | null
+}
+
+export interface UpdateConversationTitlePayload {
+  title: string
 }
 
 export interface ChatImageContentPart {
@@ -109,6 +117,10 @@ export interface StreamChatCompletionPayload {
   conversation_id?: number | null
   messages: ChatCompletionMessage[]
   stream?: boolean
+  temperature?: number
+  max_tokens?: number
+  metadata?: Record<string, unknown>
+  user_ai_ephemeral?: boolean
 }
 
 export interface StreamChatCompletionOptions {
@@ -164,6 +176,7 @@ function normalizeConversation(raw: RawRecord): AIConversation {
     user_id: toNumber(raw.user_id ?? raw.UserID),
     group_id: toNullableNumber(raw.group_id ?? raw.GroupID),
     title: String(raw.title ?? raw.Title ?? ''),
+    title_generated: Boolean(raw.title_generated ?? raw.TitleGenerated ?? false),
     model: String(raw.model ?? raw.Model ?? ''),
     created_at: String(raw.created_at ?? raw.CreatedAt ?? ''),
     updated_at: String(raw.updated_at ?? raw.UpdatedAt ?? ''),
@@ -242,10 +255,10 @@ function mergeModelLists(primary: AIModelsResult, secondary: AIModelsResult): AI
   }
 }
 
-function authHeaders(): HeadersInit {
+function authHeaders(accept = 'text/event-stream'): HeadersInit {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    Accept: 'text/event-stream',
+    Accept: accept,
     'Accept-Language': getLocale()
   }
   const token = localStorage.getItem('auth_token')
@@ -358,6 +371,11 @@ export const userAiAPI = {
 
   async createConversation(payload: CreateConversationPayload): Promise<AIConversation> {
     const res = await apiClient.post('/user/chat/conversations', payload)
+    return normalizeConversation(res.data as RawRecord)
+  },
+
+  async updateConversationTitle(id: number, payload: UpdateConversationTitlePayload): Promise<AIConversation> {
+    const res = await apiClient.patch(`/user/chat/conversations/${id}/title`, payload)
     return normalizeConversation(res.data as RawRecord)
   },
 
@@ -476,5 +494,33 @@ export const userAiAPI = {
     }
 
     return fullText
+  },
+
+  async completeChatCompletions(
+    payload: StreamChatCompletionPayload,
+    options: StreamChatCompletionOptions = {}
+  ): Promise<string> {
+    const response = await fetch(`${API_BASE_URL}/user/chat/completions`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: authHeaders('application/json'),
+      body: JSON.stringify({ ...payload, stream: false }),
+      signal: options.signal
+    })
+
+    if (!response.ok) {
+      throw new Error(await readErrorMessage(response))
+    }
+
+    const text = await response.text()
+    if (!text) return ''
+    try {
+      const content = extractAssistantContent(JSON.parse(text))
+      if (content) options.onDelta?.(content)
+      return content
+    } catch {
+      options.onDelta?.(text)
+      return text
+    }
   }
 }

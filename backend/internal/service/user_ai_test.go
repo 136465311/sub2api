@@ -36,6 +36,10 @@ func (s *userAIRepoStub) CreateChatConversation(context.Context, ChatConversatio
 	panic("unexpected CreateChatConversation call")
 }
 
+func (s *userAIRepoStub) UpdateChatConversationTitle(context.Context, ChatConversationTitleUpdateInput) (*ChatConversation, error) {
+	panic("unexpected UpdateChatConversationTitle call")
+}
+
 func (s *userAIRepoStub) DeleteChatConversation(context.Context, int64, int64) error {
 	panic("unexpected DeleteChatConversation call")
 }

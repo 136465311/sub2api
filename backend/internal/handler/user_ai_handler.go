@@ -111,6 +111,43 @@ func (h *UserAIHandler) CreateChatConversation(c *gin.Context) {
 	response.Created(c, conversation)
 }
 
+func (h *UserAIHandler) UpdateChatConversationTitle(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || id <= 0 {
+		response.BadRequest(c, "Invalid conversation ID")
+		return
+	}
+
+	var req struct {
+		Title string `json:"title"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Title) == "" {
+		response.BadRequest(c, "title is required")
+		return
+	}
+
+	conversation, err := h.userAIService.UpdateChatConversationTitle(c.Request.Context(), service.ChatConversationTitleUpdateInput{
+		UserID:         subject.UserID,
+		ConversationID: id,
+		Title:          req.Title,
+	})
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, conversation)
+}
+
 func (h *UserAIHandler) DeleteChatConversation(c *gin.Context) {
 	subject, ok := middleware2.GetAuthSubjectFromContext(c)
 	if !ok {
@@ -179,11 +216,17 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 	userContent := extractLastUserMessage(body)
 	userContentForStorage := extractLastUserMessageRawContent(body)
 	conversationID := parseOptionalInt64Value(payload["conversation_id"])
-	conversation, err := h.userAIService.EnsureChatConversation(c.Request.Context(), subject.UserID, conversationID, &resolvedGroupID, model, userContent)
-	if err != nil {
-		response.ErrorFrom(c, err)
-		c.Abort()
-		return
+	ephemeral := parseOptionalBoolValue(payload["user_ai_ephemeral"]) ||
+		parseOptionalBoolValue(gjson.GetBytes(body, "metadata.user_ai_ephemeral").Value())
+	var resolvedConversationID int64
+	if !ephemeral {
+		conversation, err := h.userAIService.EnsureChatConversation(c.Request.Context(), subject.UserID, conversationID, &resolvedGroupID, model, userContent)
+		if err != nil {
+			response.ErrorFrom(c, err)
+			c.Abort()
+			return
+		}
+		resolvedConversationID = conversation.ID
 	}
 
 	internalKey, err := h.userAIService.GetOrCreateInternalKey(c.Request.Context(), subject.UserID, &resolvedGroupID)
@@ -197,6 +240,7 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 	delete(payload, "group_id")
 	delete(payload, "group_name")
 	delete(payload, "group")
+	deleteUserAIEphemeralFields(payload)
 	rewriteUserAIRelativeImageURLs(payload, userAIRequestBaseURL(c))
 	cleanBody, err := json.Marshal(payload)
 	if err != nil {
@@ -205,11 +249,13 @@ func (h *UserAIHandler) PrepareChatCompletionsProxy(c *gin.Context) {
 		return
 	}
 
-	c.Set(userAIConversationIDContextKey, conversation.ID)
-	c.Set(userAIUserMessageContextKey, userContent)
-	c.Set(userAIUserContentContextKey, userContentForStorage)
-	c.Set(userAIModelContextKey, model)
-	c.Set(userAIGroupIDContextKey, resolvedGroupID)
+	if !ephemeral {
+		c.Set(userAIConversationIDContextKey, resolvedConversationID)
+		c.Set(userAIUserMessageContextKey, userContent)
+		c.Set(userAIUserContentContextKey, userContentForStorage)
+		c.Set(userAIModelContextKey, model)
+		c.Set(userAIGroupIDContextKey, resolvedGroupID)
+	}
 	c.Request.Header.Set("Authorization", "Bearer "+internalKey.Key)
 	c.Request.Header.Del("x-api-key")
 	c.Request.Header.Del("x-goog-api-key")
@@ -297,6 +343,34 @@ func parseOptionalInt64Value(v any) int64 {
 		return n
 	default:
 		return 0
+	}
+}
+
+func parseOptionalBoolValue(v any) bool {
+	switch typed := v.(type) {
+	case bool:
+		return typed
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	default:
+		return false
+	}
+}
+
+func deleteUserAIEphemeralFields(payload map[string]any) {
+	delete(payload, "user_ai_ephemeral")
+	metadata, ok := payload["metadata"].(map[string]any)
+	if !ok {
+		return
+	}
+	delete(metadata, "user_ai_ephemeral")
+	if len(metadata) == 0 {
+		delete(payload, "metadata")
 	}
 }
 
