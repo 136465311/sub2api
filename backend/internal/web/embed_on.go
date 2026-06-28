@@ -207,8 +207,8 @@ func (s *FrontendServer) injectSettings(settingsJSON []byte) []byte {
 	headClose := []byte("</head>")
 	result := bytes.Replace(s.baseHTML, headClose, append(script, headClose...), 1)
 
-	// Replace <title> with custom site name so the browser tab shows it immediately
-	result = injectSiteTitle(result, settingsJSON)
+	// Apply public branding to HTML metadata before JS loads.
+	result = injectSEOSettings(result, settingsJSON)
 
 	return result
 }
@@ -216,26 +216,133 @@ func (s *FrontendServer) injectSettings(settingsJSON []byte) []byte {
 // injectSiteTitle replaces the static <title> in HTML with the configured site name.
 // This ensures the browser tab shows the correct title before JS executes.
 func injectSiteTitle(html, settingsJSON []byte) []byte {
+	return injectSEOSettings(html, settingsJSON)
+}
+
+// injectSEOSettings updates the static HTML metadata from public branding settings.
+// This gives crawlers and social previews useful metadata before the SPA hydrates.
+func injectSEOSettings(html, settingsJSON []byte) []byte {
 	var cfg struct {
-		SiteName string `json:"site_name"`
+		SiteName     string `json:"site_name"`
+		SiteSubtitle string `json:"site_subtitle"`
+		SiteLogo     string `json:"site_logo"`
 	}
-	if err := json.Unmarshal(settingsJSON, &cfg); err != nil || cfg.SiteName == "" {
+	if err := json.Unmarshal(settingsJSON, &cfg); err != nil {
 		return html
 	}
 
-	// Find and replace the existing <title>...</title>
-	titleStart := bytes.Index(html, []byte("<title>"))
-	titleEnd := bytes.Index(html, []byte("</title>"))
-	if titleStart == -1 || titleEnd == -1 || titleEnd <= titleStart {
+	siteName := strings.TrimSpace(cfg.SiteName)
+	siteSubtitle := strings.TrimSpace(cfg.SiteSubtitle)
+	siteLogo := strings.TrimSpace(cfg.SiteLogo)
+	if siteName == "" && siteSubtitle == "" && siteLogo == "" {
 		return html
 	}
 
-	newTitle := []byte("<title>" + cfg.SiteName + " - AI API Gateway</title>")
+	if siteName == "" {
+		siteName = "Sub2API"
+	}
+	title := siteName + " - AI API Gateway"
+	description := siteSubtitle
+	if description == "" {
+		description = "Sub2API is an AI API gateway for Claude, GPT, Gemini and other models, with unified API keys, account routing, usage analytics and billing."
+	}
+	if siteLogo == "" {
+		siteLogo = "/logo.png"
+	}
+
+	result := replaceElementContent(html, "title", title)
+	result = replaceMetaContent(result, `name="description"`, description)
+	result = replaceMetaContent(result, `property="og:site_name"`, siteName)
+	result = replaceMetaContent(result, `property="og:title"`, title)
+	result = replaceMetaContent(result, `property="og:description"`, description)
+	result = replaceMetaContent(result, `property="og:image"`, siteLogo)
+	result = replaceMetaContent(result, `name="twitter:title"`, title)
+	result = replaceMetaContent(result, `name="twitter:description"`, description)
+	result = replaceMetaContent(result, `name="twitter:image"`, siteLogo)
+	return result
+}
+
+func replaceElementContent(html []byte, tag string, content string) []byte {
+	open := []byte("<" + tag + ">")
+	close := []byte("</" + tag + ">")
+	start := bytes.Index(html, open)
+	end := bytes.Index(html, close)
+	if start == -1 || end == -1 || end <= start {
+		return html
+	}
+
 	var buf bytes.Buffer
-	buf.Write(html[:titleStart])
-	buf.Write(newTitle)
-	buf.Write(html[titleEnd+len("</title>"):])
+	buf.Write(html[:start])
+	buf.Write(open)
+	buf.WriteString(htmlEscapeString(content))
+	buf.Write(html[end:])
 	return buf.Bytes()
+}
+
+func replaceMetaContent(html []byte, selector string, content string) []byte {
+	selectorBytes := []byte(selector)
+	searchFrom := 0
+	for {
+		idx := bytes.Index(html[searchFrom:], selectorBytes)
+		if idx == -1 {
+			return html
+		}
+		idx += searchFrom
+
+		tagStart := bytes.LastIndex(html[:idx], []byte("<meta"))
+		tagEndRelative := bytes.Index(html[idx:], []byte(">"))
+		if tagStart == -1 || tagEndRelative == -1 {
+			return html
+		}
+		tagEnd := idx + tagEndRelative + 1
+		tag := html[tagStart:tagEnd]
+		if !bytes.Contains(tag, selectorBytes) {
+			searchFrom = idx + len(selectorBytes)
+			continue
+		}
+
+		replacedTag := replaceAttributeValue(tag, "content", content)
+		if bytes.Equal(replacedTag, tag) {
+			return html
+		}
+
+		result := make([]byte, 0, len(html)-len(tag)+len(replacedTag))
+		result = append(result, html[:tagStart]...)
+		result = append(result, replacedTag...)
+		result = append(result, html[tagEnd:]...)
+		return result
+	}
+}
+
+func replaceAttributeValue(tag []byte, attr string, value string) []byte {
+	prefix := []byte(attr + `="`)
+	attrStart := bytes.Index(tag, prefix)
+	if attrStart == -1 {
+		return tag
+	}
+	valueStart := attrStart + len(prefix)
+	valueEndRelative := bytes.IndexByte(tag[valueStart:], '"')
+	if valueEndRelative == -1 {
+		return tag
+	}
+	valueEnd := valueStart + valueEndRelative
+
+	escaped := []byte(htmlEscapeString(value))
+	result := make([]byte, 0, len(tag)-valueEnd+valueStart+len(escaped))
+	result = append(result, tag[:valueStart]...)
+	result = append(result, escaped...)
+	result = append(result, tag[valueEnd:]...)
+	return result
+}
+
+func htmlEscapeString(value string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		`"`, "&quot;",
+		"<", "&lt;",
+		">", "&gt;",
+	)
+	return replacer.Replace(value)
 }
 
 // replaceNoncePlaceholder replaces the nonce placeholder with actual nonce value
@@ -305,6 +412,8 @@ func shouldBypassEmbeddedFrontend(path string) bool {
 		strings.HasPrefix(trimmed, "/antigravity/") ||
 		strings.HasPrefix(trimmed, "/setup/") ||
 		trimmed == "/health" ||
+		trimmed == "/robots.txt" ||
+		trimmed == "/sitemap.xml" ||
 		trimmed == "/responses" ||
 		strings.HasPrefix(trimmed, "/responses/") ||
 		strings.HasPrefix(trimmed, "/images/") ||

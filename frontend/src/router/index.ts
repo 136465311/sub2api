@@ -12,7 +12,7 @@ import { useNavigationLoadingState } from '@/composables/useNavigationLoading'
 import { useRoutePrefetch } from '@/composables/useRoutePrefetch'
 import { getSetupStatus } from '@/api/setup'
 import { resolveCompletedSetupRedirectPath } from './setupRedirect'
-import { resolveRouteDocumentTitle } from './title'
+import { applyRouteSeo } from '@/utils/seo'
 
 /**
  * Route definitions with lazy loading
@@ -31,13 +31,19 @@ const routes: RouteRecordRaw[] = [
 
   // ==================== Public Routes ====================
   {
-    path: '/home',
+    path: '/',
     name: 'Home',
     component: () => import('@/views/HomeView.vue'),
     meta: {
       requiresAuth: false,
-      title: 'Home'
+      title: 'Home',
+      titleKey: 'home.heroSubtitle',
+      descriptionKey: 'home.heroDescription'
     }
+  },
+  {
+    path: '/home',
+    redirect: '/'
   },
   {
     path: '/login',
@@ -46,7 +52,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'Login',
-      titleKey: 'home.login'
+      titleKey: 'home.login',
+      robots: 'noindex'
     }
   },
   {
@@ -56,7 +63,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'Register',
-      titleKey: 'auth.createAccount'
+      titleKey: 'auth.createAccount',
+      robots: 'noindex'
     }
   },
   {
@@ -65,7 +73,8 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/auth/EmailVerifyView.vue'),
     meta: {
       requiresAuth: false,
-      title: 'Verify Email'
+      title: 'Verify Email',
+      robots: 'noindex'
     }
   },
   {
@@ -76,7 +85,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'OAuth Callback',
-      titleKey: 'auth.oauthCallbackPageTitle'
+      titleKey: 'auth.oauthCallbackPageTitle',
+      robots: 'noindex'
     }
   },
   {
@@ -86,7 +96,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'LinuxDo OAuth Callback',
-      titleKey: 'auth.linuxdoCallbackPageTitle'
+      titleKey: 'auth.linuxdoCallbackPageTitle',
+      robots: 'noindex'
     }
   },
   {
@@ -96,7 +107,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'WeChat OAuth Callback',
-      titleKey: 'auth.wechatCallbackPageTitle'
+      titleKey: 'auth.wechatCallbackPageTitle',
+      robots: 'noindex'
     }
   },
   {
@@ -106,7 +118,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'WeChat Payment Callback',
-      titleKey: 'auth.wechatPaymentCallbackPageTitle'
+      titleKey: 'auth.wechatPaymentCallbackPageTitle',
+      robots: 'noindex'
     }
   },
   {
@@ -116,7 +129,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'DingTalk OAuth Callback',
-      titleKey: 'auth.dingtalkCallbackPageTitle'
+      titleKey: 'auth.dingtalkCallbackPageTitle',
+      robots: 'noindex'
     }
   },
   {
@@ -125,7 +139,8 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/auth/DingTalkEmailCompletionView.vue'),
     meta: {
       requiresAuth: false,
-      title: 'DingTalk Email Completion'
+      title: 'DingTalk Email Completion',
+      robots: 'noindex'
     }
   },
   {
@@ -135,7 +150,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'OIDC OAuth Callback',
-      titleKey: 'auth.oidcCallbackPageTitle'
+      titleKey: 'auth.oidcCallbackPageTitle',
+      robots: 'noindex'
     }
   },
   {
@@ -145,7 +161,8 @@ const routes: RouteRecordRaw[] = [
     meta: {
       requiresAuth: false,
       title: 'Forgot Password',
-      titleKey: 'auth.forgotPasswordTitle'
+      titleKey: 'auth.forgotPasswordTitle',
+      robots: 'noindex'
     }
   },
   {
@@ -154,7 +171,8 @@ const routes: RouteRecordRaw[] = [
     component: () => import('@/views/auth/ResetPasswordView.vue'),
     meta: {
       requiresAuth: false,
-      title: 'Reset Password'
+      title: 'Reset Password',
+      robots: 'noindex'
     }
   },
   {
@@ -177,10 +195,6 @@ const routes: RouteRecordRaw[] = [
   },
 
   // ==================== User Routes ====================
-  {
-    path: '/',
-    redirect: '/home'
-  },
   {
     path: '/dashboard',
     name: 'Dashboard',
@@ -761,7 +775,12 @@ router.beforeEach(async (to, _from, next) => {
     ...(appStore.cachedPublicSettings?.custom_menu_items ?? []),
     ...(authStore.isAdmin ? adminSettingsStore.customMenuItems : []),
   ]
-  document.title = resolveRouteDocumentTitle(to, appStore.siteName, customMenuItems)
+  applyRouteSeo(to, {
+    siteName: appStore.siteName,
+    siteSubtitle: appStore.cachedPublicSettings?.site_subtitle,
+    siteLogo: appStore.siteLogo,
+    customMenuItems
+  })
 
   // Check if route requires authentication
   const requiresAuth = to.meta.requiresAuth !== false // Default to true

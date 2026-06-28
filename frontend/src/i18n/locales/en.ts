@@ -722,6 +722,7 @@ export default {
     n2: '2 images',
     n3: '3 images',
     n4: '4 images',
+    sizeAuto: 'Auto',
     sizeSquare: '1:1',
     sizeLandscape: '16:9',
     sizePortrait: '9:16'

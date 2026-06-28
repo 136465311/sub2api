@@ -64,5 +64,15 @@ declare module 'vue-router' {
      * i18n key for the page description
      */
     descriptionKey?: string
+
+    /**
+     * Static page description used when no i18n descriptionKey is provided
+     */
+    description?: string
+
+    /**
+     * Search crawler directive for pages that should not be indexed
+     */
+    robots?: 'index' | 'noindex'
   }
 }

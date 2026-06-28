@@ -42,6 +42,9 @@ type userAIImageGenerationRequest struct {
 	Model          string `json:"model"`
 	Size           string `json:"size"`
 	N              int    `json:"n"`
+	Quality        string `json:"quality"`
+	OutputFormat   string `json:"output_format"`
+	Moderation     string `json:"moderation"`
 	GroupID        any    `json:"group_id"`
 	GroupName      any    `json:"group_name"`
 	Group          any    `json:"group"`
@@ -53,6 +56,9 @@ type userAIImageEditRequest struct {
 	Model          string   `json:"model"`
 	Size           string   `json:"size"`
 	N              int      `json:"n"`
+	Quality        string   `json:"quality"`
+	OutputFormat   string   `json:"output_format"`
+	Moderation     string   `json:"moderation"`
 	GroupID        any      `json:"group_id"`
 	GroupName      any      `json:"group_name"`
 	Group          any      `json:"group"`
@@ -111,6 +117,9 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	req.Model = strings.TrimSpace(req.Model)
 	req.Size = normalizeUserAIImageSize(req.Size)
+	req.Quality = normalizeUserAIImageAutoOption(req.Quality)
+	req.OutputFormat = normalizeUserAIImageOutputFormat(req.OutputFormat)
+	req.Moderation = normalizeUserAIImageAutoOption(req.Moderation)
 	if req.Prompt == "" {
 		response.ErrorFrom(c, service.ErrAIImageRequired)
 		c.Abort()
@@ -164,10 +173,13 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 		if imageContext != nil && len(imageContext.ReferenceImageURLs) > 0 {
 			if relativeImageURLs, err := validateUserAIEditImageURLs(subject.UserID, imageContext.ReferenceImageURLs); err == nil {
 				editReq := userAIImageEditRequest{
-					Prompt: imageContext.Prompt,
-					Model:  req.Model,
-					Size:   req.Size,
-					N:      req.N,
+					Prompt:       imageContext.Prompt,
+					Model:        req.Model,
+					Size:         req.Size,
+					N:            req.N,
+					Quality:      req.Quality,
+					OutputFormat: req.OutputFormat,
+					Moderation:   req.Moderation,
 				}
 				if editBody, editContentType, err := h.buildUserAIImageEditMultipartBody(editReq, relativeImageURLs); err == nil {
 					cleanBody = editBody
@@ -186,6 +198,9 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 			"model":           req.Model,
 			"size":            req.Size,
 			"n":               req.N,
+			"quality":         req.Quality,
+			"output_format":   req.OutputFormat,
+			"moderation":      req.Moderation,
 			"response_format": "url",
 		}
 		cleanBody, err = json.Marshal(payload)
@@ -242,6 +257,9 @@ func (h *UserAIHandler) PrepareImageEditsProxy(c *gin.Context) {
 	req.Prompt = strings.TrimSpace(req.Prompt)
 	req.Model = strings.TrimSpace(req.Model)
 	req.Size = normalizeUserAIImageSize(req.Size)
+	req.Quality = normalizeUserAIImageAutoOption(req.Quality)
+	req.OutputFormat = normalizeUserAIImageOutputFormat(req.OutputFormat)
+	req.Moderation = normalizeUserAIImageAutoOption(req.Moderation)
 	if req.Prompt == "" {
 		response.ErrorFrom(c, service.ErrAIImageRequired)
 		c.Abort()
@@ -494,7 +512,9 @@ func (h *UserAIHandler) ListImageHistory(c *gin.Context) {
 
 func normalizeUserAIImageSize(size string) string {
 	switch strings.TrimSpace(size) {
-	case "", "1:1", "square", "1024x1024":
+	case "":
+		return "auto"
+	case "1:1", "square", "1024x1024":
 		return "1024x1024"
 	case "16:9", "landscape", "2048x1152":
 		return "2048x1152"
@@ -503,6 +523,20 @@ func normalizeUserAIImageSize(size string) string {
 	default:
 		return strings.TrimSpace(size)
 	}
+}
+
+func normalizeUserAIImageAutoOption(value string) string {
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return trimmed
+	}
+	return "auto"
+}
+
+func normalizeUserAIImageOutputFormat(value string) string {
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		return trimmed
+	}
+	return "png"
 }
 
 func parseUserAIGroupRequest(groupIDValue, groupNameValue, groupValue any) service.AIGroupRequest {
@@ -590,6 +624,15 @@ func (h *UserAIHandler) buildUserAIImageEditMultipartBody(req userAIImageEditReq
 		return nil, "", err
 	}
 	if err := writeField("size", req.Size); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("quality", req.Quality); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("output_format", req.OutputFormat); err != nil {
+		return nil, "", err
+	}
+	if err := writeField("moderation", req.Moderation); err != nil {
 		return nil, "", err
 	}
 	if req.N > 0 {

@@ -23,11 +23,12 @@ import (
 
 func TestNormalizeUserAIImageSize(t *testing.T) {
 	tests := map[string]string{
-		"":          "1024x1024",
+		"":          "auto",
 		"1:1":       "1024x1024",
 		"16:9":      "2048x1152",
 		"9:16":      "1152x2048",
 		"1024x1024": "1024x1024",
+		"auto":      "auto",
 	}
 
 	for input, want := range tests {
@@ -303,6 +304,95 @@ func TestPrepareImageGenerationsProxyUsesConversationHistoryReferences(t *testin
 	}
 }
 
+func TestPrepareImageGenerationsProxyUsesImageDefaultOptions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(12)
+	apiKeyRepo := &userAIImageAPIKeyRepoStub{
+		keys: []service.APIKey{{
+			ID:      99,
+			UserID:  7,
+			Key:     "sk-user-ai-internal",
+			Source:  service.APIKeySourceUserAI,
+			GroupID: &groupID,
+			Status:  service.StatusAPIKeyActive,
+		}},
+	}
+	apiKeyService := service.NewAPIKeyService(
+		apiKeyRepo,
+		&userAIImageUserRepoStub{},
+		&userAIImageGroupRepoStub{
+			groups: []service.Group{{
+				ID:       groupID,
+				Name:     "image",
+				Platform: service.PlatformOpenAI,
+				Status:   service.StatusActive,
+			}},
+		},
+		&userAIImageSubscriptionRepoStub{},
+		nil,
+		nil,
+		&config.Config{},
+	)
+	h := &UserAIHandler{
+		userAIService:     service.NewUserAIService(&userAIImageRepoStub{}, apiKeyService, nil),
+		uploadRoot:        t.TempDir(),
+		uploadPublicRoot:  userAIUploadPublicRoot,
+		uploadMaxFileSize: userAIUploadMaxFileSize,
+	}
+
+	body := `{"prompt":"draw a blog banner","model":"gpt-image-2","n":1,"group_id":12}`
+	rec := httptest.NewRecorder()
+	nextCalled := false
+	router := gin.New()
+	router.POST("/api/v1/user/images/generations", func(c *gin.Context) {
+		c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 7})
+	}, h.PrepareImageGenerationsProxy, func(c *gin.Context) {
+		nextCalled = true
+		if got := c.Request.URL.Path; got != "/v1/images/generations" {
+			t.Fatalf("path = %q, want /v1/images/generations", got)
+		}
+		if got := c.GetHeader("Content-Type"); got != "application/json" {
+			t.Fatalf("content-type = %q", got)
+		}
+		if got := c.GetHeader("Authorization"); got != "Bearer sk-user-ai-internal" {
+			t.Fatalf("authorization header = %q", got)
+		}
+		rewritten, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			t.Fatalf("read rewritten body: %v", err)
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(rewritten, &payload); err != nil {
+			t.Fatalf("rewritten body should be JSON: %v", err)
+		}
+		if got := payload["size"]; got != "auto" {
+			t.Fatalf("size = %#v, want auto; body=%s", got, string(rewritten))
+		}
+		if got := payload["quality"]; got != "auto" {
+			t.Fatalf("quality = %#v, want auto; body=%s", got, string(rewritten))
+		}
+		if got := payload["moderation"]; got != "auto" {
+			t.Fatalf("moderation = %#v, want auto; body=%s", got, string(rewritten))
+		}
+		if got := payload["output_format"]; got != "png" {
+			t.Fatalf("output_format = %#v, want png; body=%s", got, string(rewritten))
+		}
+		c.Status(http.StatusNoContent)
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "https://chat.example/api/v1/user/images/generations", bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("PrepareImageGenerationsProxy returned status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !nextCalled {
+		t.Fatal("expected next handler to be called")
+	}
+}
+
 func TestPrepareImageEditsProxyBuildsMultipartFromUploadedImageURLs(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -386,6 +476,15 @@ func TestPrepareImageEditsProxyBuildsMultipartFromUploadedImageURLs(t *testing.T
 		}
 		if got := form.Value["size"]; len(got) != 1 || got[0] != "1024x1024" {
 			t.Fatalf("size field = %#v", got)
+		}
+		if got := form.Value["quality"]; len(got) != 1 || got[0] != "auto" {
+			t.Fatalf("quality field = %#v", got)
+		}
+		if got := form.Value["output_format"]; len(got) != 1 || got[0] != "png" {
+			t.Fatalf("output_format field = %#v", got)
+		}
+		if got := form.Value["moderation"]; len(got) != 1 || got[0] != "auto" {
+			t.Fatalf("moderation field = %#v", got)
 		}
 		if got := form.Value["n"]; len(got) != 1 || got[0] != "2" {
 			t.Fatalf("n field = %#v", got)

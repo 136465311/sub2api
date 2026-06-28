@@ -721,6 +721,7 @@ export default {
     n2: '2 张',
     n3: '3 张',
     n4: '4 张',
+    sizeAuto: '自动',
     sizeSquare: '1:1',
     sizeLandscape: '16:9',
     sizePortrait: '9:16'

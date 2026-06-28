@@ -92,6 +92,37 @@ func TestInjectSiteTitle(t *testing.T) {
 	})
 }
 
+func TestInjectSEOSettings(t *testing.T) {
+	t.Run("updates_description_and_social_metadata", func(t *testing.T) {
+		html := []byte(`<!doctype html><html><head><title>Sub2API - AI API Gateway</title><meta name="description" content="old"><meta property="og:site_name" content="Sub2API"><meta property="og:title" content="old"><meta property="og:description" content="old"><meta property="og:image" content="/logo.png"><meta name="twitter:title" content="old"><meta name="twitter:description" content="old"><meta name="twitter:image" content="/logo.png"></head><body></body></html>`)
+		settingsJSON := []byte(`{"site_name":"My Site","site_subtitle":"Unified AI access","site_logo":"https://cdn.example/logo.png"}`)
+
+		result := injectSEOSettings(html, settingsJSON)
+		body := string(result)
+
+		assert.Contains(t, body, `<title>My Site - AI API Gateway</title>`)
+		assert.Contains(t, body, `name="description" content="Unified AI access"`)
+		assert.Contains(t, body, `property="og:site_name" content="My Site"`)
+		assert.Contains(t, body, `property="og:title" content="My Site - AI API Gateway"`)
+		assert.Contains(t, body, `property="og:description" content="Unified AI access"`)
+		assert.Contains(t, body, `property="og:image" content="https://cdn.example/logo.png"`)
+		assert.Contains(t, body, `name="twitter:title" content="My Site - AI API Gateway"`)
+		assert.Contains(t, body, `name="twitter:description" content="Unified AI access"`)
+		assert.Contains(t, body, `name="twitter:image" content="https://cdn.example/logo.png"`)
+	})
+
+	t.Run("escapes_metadata_values", func(t *testing.T) {
+		html := []byte(`<html><head><title>Sub2API</title><meta name="description" content="old"></head><body></body></html>`)
+		settingsJSON := []byte(`{"site_name":"A&B <Site>","site_subtitle":"Use \"one\" key"}`)
+
+		result := injectSEOSettings(html, settingsJSON)
+		body := string(result)
+
+		assert.Contains(t, body, `<title>A&amp;B &lt;Site&gt; - AI API Gateway</title>`)
+		assert.Contains(t, body, `content="Use &quot;one&quot; key"`)
+	})
+}
+
 func TestReplaceNoncePlaceholder(t *testing.T) {
 	t.Run("replaces_single_placeholder", func(t *testing.T) {
 		html := []byte(`<script nonce="__CSP_NONCE_VALUE__">console.log('test');</script>`)
@@ -439,6 +470,8 @@ func TestFrontendServer_Middleware(t *testing.T) {
 			"/antigravity/test",
 			"/setup/init",
 			"/health",
+			"/robots.txt",
+			"/sitemap.xml",
 			"/responses",
 			"/responses/compact",
 		}
@@ -643,6 +676,8 @@ func TestServeEmbeddedFrontend(t *testing.T) {
 			"/antigravity/test",
 			"/setup/init",
 			"/health",
+			"/robots.txt",
+			"/sitemap.xml",
 			"/responses",
 			"/responses/compact",
 		}

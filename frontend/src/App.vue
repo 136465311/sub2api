@@ -4,10 +4,10 @@ import { onMounted, onBeforeUnmount, watch } from 'vue'
 import Toast from '@/components/common/Toast.vue'
 import NavigationProgress from '@/components/common/NavigationProgress.vue'
 import AdminComplianceDialog from '@/components/admin/AdminComplianceDialog.vue'
-import { resolveRouteDocumentTitle } from '@/router/title'
 import AnnouncementPopup from '@/components/common/AnnouncementPopup.vue'
 import { useAppStore, useAuthStore, useSubscriptionStore, useAnnouncementStore, useAdminComplianceStore, useAdminSettingsStore } from '@/stores'
 import { getSetupStatus } from '@/api/setup'
+import { applyRouteSeo } from '@/utils/seo'
 
 const router = useRouter()
 const route = useRoute()
@@ -23,7 +23,12 @@ function updateDocumentTitle() {
     ...(appStore.cachedPublicSettings?.custom_menu_items ?? []),
     ...(authStore.isAdmin ? adminSettingsStore.customMenuItems : []),
   ]
-  document.title = resolveRouteDocumentTitle(route, appStore.siteName, customMenuItems)
+  applyRouteSeo(route, {
+    siteName: appStore.siteName,
+    siteSubtitle: appStore.cachedPublicSettings?.site_subtitle,
+    siteLogo: appStore.siteLogo,
+    customMenuItems
+  })
 }
 
 /**
@@ -59,6 +64,8 @@ watch(
     () => route.meta.title,
     () => route.meta.titleKey,
     () => appStore.siteName,
+    () => appStore.siteLogo,
+    () => appStore.cachedPublicSettings?.site_subtitle,
     () => appStore.cachedPublicSettings?.custom_menu_items,
     () => authStore.isAdmin,
     () => adminSettingsStore.customMenuItems,
