@@ -412,6 +412,7 @@ export default {
     logout: 'Logout',
     github: 'GitHub',
     mySubscriptions: 'My Subscriptions',
+    rechargeBalance: 'Recharge Balance',
     buySubscription: 'Recharge / Subscription',
     docs: 'Docs',
     myOrders: 'My Orders',
