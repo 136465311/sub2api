@@ -222,6 +222,9 @@ func (s *availableGroupsSubRepoStub) Create(context.Context, *UserSubscription) 
 func (s *availableGroupsSubRepoStub) GetByID(context.Context, int64) (*UserSubscription, error) {
 	panic("unexpected GetByID call")
 }
+func (s *availableGroupsSubRepoStub) GetByIDIncludeDeleted(context.Context, int64) (*UserSubscription, error) {
+	panic("unexpected GetByIDIncludeDeleted call")
+}
 func (s *availableGroupsSubRepoStub) GetByUserIDAndGroupID(context.Context, int64, int64) (*UserSubscription, error) {
 	panic("unexpected GetByUserIDAndGroupID call")
 }
@@ -233,6 +236,9 @@ func (s *availableGroupsSubRepoStub) Update(context.Context, *UserSubscription) 
 }
 func (s *availableGroupsSubRepoStub) Delete(context.Context, int64) error {
 	panic("unexpected Delete call")
+}
+func (s *availableGroupsSubRepoStub) Restore(context.Context, int64, string) (*UserSubscription, error) {
+	panic("unexpected Restore call")
 }
 func (s *availableGroupsSubRepoStub) ListByUserID(context.Context, int64) ([]UserSubscription, error) {
 	panic("unexpected ListByUserID call")
@@ -254,6 +260,14 @@ func (s *availableGroupsSubRepoStub) List(context.Context, pagination.Pagination
 }
 func (s *availableGroupsSubRepoStub) ExistsByUserIDAndGroupID(context.Context, int64, int64) (bool, error) {
 	panic("unexpected ExistsByUserIDAndGroupID call")
+}
+func (s *availableGroupsSubRepoStub) ExistsActiveByUserIDAndGroupID(_ context.Context, userID, groupID int64) (bool, error) {
+	for _, sub := range s.active {
+		if sub.UserID == userID && sub.GroupID == groupID {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 func (s *availableGroupsSubRepoStub) ExtendExpiry(context.Context, int64, time.Time) error {
 	panic("unexpected ExtendExpiry call")
