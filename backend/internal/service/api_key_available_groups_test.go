@@ -281,13 +281,16 @@ func (s *availableGroupsSubRepoStub) UpdateNotes(context.Context, int64, string)
 func (s *availableGroupsSubRepoStub) ActivateWindows(context.Context, int64, time.Time) error {
 	panic("unexpected ActivateWindows call")
 }
-func (s *availableGroupsSubRepoStub) ResetDailyUsage(context.Context, int64, time.Time) error {
+func (s *availableGroupsSubRepoStub) ResetUsageWindows(context.Context, int64, bool, bool, bool, time.Time) error {
+	panic("unexpected ResetUsageWindows call")
+}
+func (s *availableGroupsSubRepoStub) ResetDailyUsage(context.Context, int64, *time.Time, time.Time) error {
 	panic("unexpected ResetDailyUsage call")
 }
-func (s *availableGroupsSubRepoStub) ResetWeeklyUsage(context.Context, int64, time.Time) error {
+func (s *availableGroupsSubRepoStub) ResetWeeklyUsage(context.Context, int64, *time.Time, time.Time) error {
 	panic("unexpected ResetWeeklyUsage call")
 }
-func (s *availableGroupsSubRepoStub) ResetMonthlyUsage(context.Context, int64, time.Time) error {
+func (s *availableGroupsSubRepoStub) ResetMonthlyUsage(context.Context, int64, *time.Time, time.Time) error {
 	panic("unexpected ResetMonthlyUsage call")
 }
 func (s *availableGroupsSubRepoStub) IncrementUsage(context.Context, int64, float64) error {
