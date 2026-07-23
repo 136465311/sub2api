@@ -5,8 +5,11 @@ package web
 import (
 	"bytes"
 	"context"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -139,6 +142,41 @@ func TestInjectSEOSettings(t *testing.T) {
 
 		assert.Contains(t, body, `<title>A&amp;B &lt;Site&gt; - AI API Gateway</title>`)
 		assert.Contains(t, body, `content="Use &quot;one&quot; key"`)
+	})
+}
+
+func TestInjectSiteFavicon(t *testing.T) {
+	t.Run("replaces_favicon_with_site_logo", func(t *testing.T) {
+		html := []byte(`<html><head><link rel="icon" type="image/png" href="/logo.png" /></head></html>`)
+		settingsJSON := []byte(`{"site_logo":"https://example.com/custom-logo.png"}`)
+
+		result := injectSiteFavicon(html, settingsJSON)
+
+		assert.Contains(t, string(result), `<link rel="icon" href="https://example.com/custom-logo.png" />`)
+		assert.NotContains(t, string(result), `/logo.png`)
+	})
+
+	t.Run("supports_relative_and_data_image_urls", func(t *testing.T) {
+		html := []byte(`<link rel="icon" href="/logo.png" />`)
+
+		assert.Contains(t, string(injectSiteFavicon(html, []byte(`{"site_logo":"/uploads/logo.svg"}`))), `/uploads/logo.svg`)
+		assert.Contains(t, string(injectSiteFavicon(html, []byte(`{"site_logo":"data:image/png;base64,abc"}`))), `data:image/png;base64,abc`)
+	})
+
+	t.Run("rejects_unsafe_logo_urls", func(t *testing.T) {
+		html := []byte(`<link rel="icon" href="/logo.png" />`)
+
+		result := injectSiteFavicon(html, []byte(`{"site_logo":"javascript:alert(1)"}`))
+
+		assert.Equal(t, string(html), string(result))
+	})
+
+	t.Run("escapes_logo_url_for_html", func(t *testing.T) {
+		html := []byte(`<link rel="icon" href="/logo.png" />`)
+
+		result := injectSiteFavicon(html, []byte(`{"site_logo":"https://example.com/logo.png?a=1&b=2"}`))
+
+		assert.Contains(t, string(result), `a=1&amp;b=2`)
 	})
 }
 
@@ -471,6 +509,37 @@ func TestFrontendServer_InvalidateCache(t *testing.T) {
 	})
 }
 
+func TestOverrideFilesNeverReceiveImmutableCacheHeaders(t *testing.T) {
+	t.Parallel()
+
+	overrideDir := t.TempDir()
+	cleanPath := "assets/index-AbCd1234.js"
+	filePath := filepath.Join(overrideDir, cleanPath)
+	require.NoError(t, os.MkdirAll(filepath.Dir(filePath), 0o755))
+	require.NoError(t, os.WriteFile(filePath, []byte("override"), 0o644))
+
+	t.Run("frontend_server_override", func(t *testing.T) {
+		t.Parallel()
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/"+cleanPath, nil)
+
+		server := &FrontendServer{overrideDir: overrideDir}
+		assert.True(t, server.tryServeOverride(c, cleanPath))
+		assert.Empty(t, w.Header().Get("Cache-Control"))
+	})
+
+	t.Run("legacy_override", func(t *testing.T) {
+		t.Parallel()
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/"+cleanPath, nil)
+
+		assert.True(t, tryServeOverrideFile(c, overrideDir, cleanPath))
+		assert.Empty(t, w.Header().Get("Cache-Control"))
+	})
+}
+
 func TestFrontendServer_Middleware(t *testing.T) {
 	t.Run("skips_api_routes", func(t *testing.T) {
 		provider := &mockSettingsProvider{
@@ -482,6 +551,7 @@ func TestFrontendServer_Middleware(t *testing.T) {
 
 		apiPaths := []string{
 			"/api/v1/users",
+			"/models",
 			"/v1/models",
 			"/v1beta/chat",
 			"/backend-api/codex/responses",
@@ -618,6 +688,26 @@ func TestFrontendServer_Middleware(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Header().Get("Content-Type"), "image/png")
+		assert.Empty(t, w.Header().Get("Cache-Control"))
+
+		entries, err := fs.ReadDir(server.distFS, "assets")
+		require.NoError(t, err)
+		fingerprintedPath := ""
+		for _, entry := range entries {
+			candidate := "assets/" + entry.Name()
+			if !entry.IsDir() && isFingerprintedEmbeddedAssetPath(candidate) {
+				fingerprintedPath = candidate
+				break
+			}
+		}
+		require.NotEmpty(t, fingerprintedPath)
+
+		assetWriter := httptest.NewRecorder()
+		assetRequest := httptest.NewRequest(http.MethodGet, "/"+fingerprintedPath, nil)
+		router.ServeHTTP(assetWriter, assetRequest)
+
+		assert.Equal(t, http.StatusOK, assetWriter.Code)
+		assert.Equal(t, staticAssetsCacheControl, assetWriter.Header().Get("Cache-Control"))
 	})
 }
 
@@ -725,6 +815,7 @@ func TestServeEmbeddedFrontend(t *testing.T) {
 
 		apiPaths := []string{
 			"/api/users",
+			"/models",
 			"/v1/models",
 			"/v1beta/chat",
 			"/backend-api/codex/responses",
