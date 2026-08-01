@@ -135,7 +135,7 @@ func (s *availableGroupsAPIKeyRepoStub) GetBySourceForUserGroup(_ context.Contex
 	}
 	return nil, ErrAPIKeyNotFound
 }
-func (s *availableGroupsAPIKeyRepoStub) Update(context.Context, *APIKey) error {
+func (s *availableGroupsAPIKeyRepoStub) Update(context.Context, *APIKey, APIKeyUpdateFields) error {
 	panic("unexpected Update call")
 }
 func (s *availableGroupsAPIKeyRepoStub) Delete(context.Context, int64) error {

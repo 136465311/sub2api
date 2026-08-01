@@ -86,7 +86,7 @@ func (s *apiKeyRepoStub) GetBySourceForUserGroup(ctx context.Context, userID int
 	panic("unexpected GetBySourceForUserGroup call")
 }
 
-func (s *apiKeyRepoStub) Update(ctx context.Context, key *APIKey) error {
+func (s *apiKeyRepoStub) Update(ctx context.Context, key *APIKey, _ APIKeyUpdateFields) error {
 	if key != nil {
 		s.updatedKeys = append(s.updatedKeys, *key)
 	}

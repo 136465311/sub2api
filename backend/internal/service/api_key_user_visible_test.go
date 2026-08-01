@@ -34,8 +34,10 @@ func (s *userVisibleAPIKeyRepoStub) GetByKeyForAuth(context.Context, string) (*A
 func (s *userVisibleAPIKeyRepoStub) GetBySourceForUserGroup(context.Context, int64, *int64, string) (*APIKey, error) {
 	panic("unexpected")
 }
-func (s *userVisibleAPIKeyRepoStub) Update(context.Context, *APIKey) error { panic("unexpected") }
-func (s *userVisibleAPIKeyRepoStub) Delete(context.Context, int64) error   { panic("unexpected") }
+func (s *userVisibleAPIKeyRepoStub) Update(context.Context, *APIKey, APIKeyUpdateFields) error {
+	panic("unexpected")
+}
+func (s *userVisibleAPIKeyRepoStub) Delete(context.Context, int64) error { panic("unexpected") }
 func (s *userVisibleAPIKeyRepoStub) DeleteWithAudit(context.Context, int64) error {
 	panic("unexpected")
 }
