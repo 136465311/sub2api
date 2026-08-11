@@ -281,10 +281,10 @@ func (s *availableGroupsSubRepoStub) UpdateStatus(context.Context, int64, string
 func (s *availableGroupsSubRepoStub) UpdateNotes(context.Context, int64, string) error {
 	panic("unexpected UpdateNotes call")
 }
-func (s *availableGroupsSubRepoStub) ActivateWindows(context.Context, int64, time.Time) error {
+func (s *availableGroupsSubRepoStub) ActivateWindows(context.Context, int64, time.Time, time.Time) error {
 	panic("unexpected ActivateWindows call")
 }
-func (s *availableGroupsSubRepoStub) ResetUsageWindows(context.Context, int64, bool, bool, bool, time.Time) error {
+func (s *availableGroupsSubRepoStub) ResetUsageWindows(context.Context, int64, bool, bool, bool, time.Time, time.Time) error {
 	panic("unexpected ResetUsageWindows call")
 }
 func (s *availableGroupsSubRepoStub) ResetDailyUsage(context.Context, int64, *time.Time, time.Time) error {
