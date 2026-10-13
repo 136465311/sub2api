@@ -148,6 +148,7 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 		return
 	}
 	resolvedGroupID := group.ID
+	isGrok := group.Platform == service.PlatformGrok
 
 	internalKey, err := h.userAIService.GetOrCreateInternalKey(c.Request.Context(), subject.UserID, &resolvedGroupID)
 	if err != nil {
@@ -172,6 +173,11 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 		}
 		if imageContext != nil && len(imageContext.ReferenceImageURLs) > 0 {
 			if relativeImageURLs, err := validateUserAIEditImageURLs(subject.UserID, imageContext.ReferenceImageURLs); err == nil {
+				if isGrok && len(relativeImageURLs) > 3 {
+					response.BadRequest(c, "Grok image edits support at most 3 source images; select up to 3 images to continue editing")
+					c.Abort()
+					return
+				}
 				editReq := userAIImageEditRequest{
 					Prompt:       imageContext.Prompt,
 					Model:        req.Model,
@@ -181,7 +187,14 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 					OutputFormat: req.OutputFormat,
 					Moderation:   req.Moderation,
 				}
-				if editBody, editContentType, err := h.buildUserAIImageEditMultipartBody(editReq, relativeImageURLs); err == nil {
+				var editBody []byte
+				var editContentType string
+				if isGrok {
+					editBody, editContentType, err = h.buildUserAIGrokImageEditBody(editReq, relativeImageURLs)
+				} else {
+					editBody, editContentType, err = h.buildUserAIImageEditMultipartBody(editReq, relativeImageURLs)
+				}
+				if err == nil {
 					cleanBody = editBody
 					contentType = editContentType
 					targetPath = "/v1/images/edits"
@@ -194,14 +207,16 @@ func (h *UserAIHandler) PrepareImageGenerationsProxy(c *gin.Context) {
 	}
 	if len(cleanBody) == 0 {
 		payload := map[string]any{
-			"prompt":          req.Prompt,
-			"model":           req.Model,
-			"size":            req.Size,
-			"n":               req.N,
-			"quality":         req.Quality,
-			"output_format":   req.OutputFormat,
-			"moderation":      req.Moderation,
-			"response_format": "url",
+			"prompt": req.Prompt,
+			"model":  req.Model,
+			"size":   req.Size,
+			"n":      req.N,
+		}
+		if !isGrok {
+			payload["response_format"] = "url"
+			payload["quality"] = req.Quality
+			payload["output_format"] = req.OutputFormat
+			payload["moderation"] = req.Moderation
 		}
 		cleanBody, err = json.Marshal(payload)
 		if err != nil {
@@ -285,23 +300,6 @@ func (h *UserAIHandler) PrepareImageEditsProxy(c *gin.Context) {
 		c.Abort()
 		return
 	}
-	cleanBody, contentType, err := h.buildUserAIImageEditMultipartBody(req, relativeImageURLs)
-	if err != nil {
-		if errors.Is(err, errUserAIUploadTooLarge) {
-			response.Error(c, http.StatusRequestEntityTooLarge, "Image must be 20MB or smaller")
-			c.Abort()
-			return
-		}
-		if errors.Is(err, errUserAIUploadType) {
-			response.BadRequest(c, "Only JPEG, PNG, WebP, and GIF images are allowed")
-			c.Abort()
-			return
-		}
-		response.BadRequest(c, err.Error())
-		c.Abort()
-		return
-	}
-
 	groupRequest := parseUserAIGroupRequest(req.GroupID, req.GroupName, req.Group)
 	group, err := h.userAIService.ResolveImageRequestedGroup(c.Request.Context(), subject.UserID, groupRequest)
 	if err != nil {
@@ -310,6 +308,24 @@ func (h *UserAIHandler) PrepareImageEditsProxy(c *gin.Context) {
 		return
 	}
 	resolvedGroupID := group.ID
+	var cleanBody []byte
+	var contentType string
+	if group.Platform == service.PlatformGrok {
+		cleanBody, contentType, err = h.buildUserAIGrokImageEditBody(req, relativeImageURLs)
+	} else {
+		cleanBody, contentType, err = h.buildUserAIImageEditMultipartBody(req, relativeImageURLs)
+	}
+	if err != nil {
+		if errors.Is(err, errUserAIUploadTooLarge) {
+			response.Error(c, http.StatusRequestEntityTooLarge, "Image must be 20MB or smaller")
+		} else if errors.Is(err, errUserAIUploadType) {
+			response.BadRequest(c, "Only JPEG, PNG, WebP, and GIF images are allowed")
+		} else {
+			response.BadRequest(c, err.Error())
+		}
+		c.Abort()
+		return
+	}
 
 	internalKey, err := h.userAIService.GetOrCreateInternalKey(c.Request.Context(), subject.UserID, &resolvedGroupID)
 	if err != nil {
@@ -343,7 +359,11 @@ func (h *UserAIHandler) ImageGenerations(c *gin.Context) {
 		c.Writer = originalWriter
 	}()
 
-	h.openAIGateway.Images(c)
+	if getUserAIGroupPlatform(c) == service.PlatformGrok {
+		h.openAIGateway.GrokImages(c)
+	} else {
+		h.openAIGateway.Images(c)
+	}
 
 	status := capture.Status()
 	if status < http.StatusOK || status >= http.StatusBadRequest {
@@ -663,6 +683,36 @@ func (h *UserAIHandler) buildUserAIImageEditMultipartBody(req userAIImageEditReq
 		return nil, "", fmt.Errorf("finalize multipart body: %w", err)
 	}
 	return body.Bytes(), writer.FormDataContentType(), nil
+}
+
+func (h *UserAIHandler) buildUserAIGrokImageEditBody(req userAIImageEditRequest, imageURLs []string) ([]byte, string, error) {
+	if len(imageURLs) > 3 {
+		return nil, "", fmt.Errorf("Grok image edits support at most 3 source images")
+	}
+	uploads, err := h.loadUserAIEditImageUploads(imageURLs)
+	if err != nil {
+		return nil, "", err
+	}
+	images := make([]map[string]string, 0, len(uploads))
+	for _, upload := range uploads {
+		images = append(images, map[string]string{
+			"type": "image_url",
+			"url":  "data:" + upload.ContentType + ";base64," + base64.StdEncoding.EncodeToString(upload.Data),
+		})
+	}
+	payload := map[string]any{
+		"prompt": req.Prompt,
+		"model":  req.Model,
+		"n":      req.N,
+		"size":   req.Size,
+	}
+	if len(images) == 1 {
+		payload["image"] = images[0]
+	} else {
+		payload["images"] = images
+	}
+	body, err := json.Marshal(payload)
+	return body, "application/json", err
 }
 
 func (h *UserAIHandler) loadUserAIEditImageUploads(imageURLs []string) ([]userAIEditImageUpload, error) {

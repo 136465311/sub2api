@@ -493,6 +493,7 @@ import {
 } from '@/api/userAi'
 import { useUserAIStore, type SelectedAIChatImage } from '@/stores/userAi'
 import { extractApiErrorMessage } from '@/utils/apiError'
+import { isImageModel } from '@/utils/aiImageModel'
 import { formatRelativeTime } from '@/utils/format'
 
 const { t } = useI18n()
@@ -917,11 +918,6 @@ function isAllowedImageDisplayUrl(url: string): boolean {
 
 function isHostedUserAIImageUrl(url: string): boolean {
   return /^\/uploads\/user_ai\/\d+\/(?:generated\/)?[A-Za-z0-9._-]+\.(?:jpg|jpeg|png|webp|gif)$/i.test(url.trim())
-}
-
-function isImageModel(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
-  return normalized === 'gpt-image' || normalized.startsWith('gpt-image-') || normalized.startsWith('grok-image')
 }
 
 async function downloadImage(url: string, name: string): Promise<void> {

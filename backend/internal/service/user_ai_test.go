@@ -139,19 +139,33 @@ func TestResolveAIGroupFromAvailableGroupsRejectsUnavailableGroup(t *testing.T) 
 	}
 }
 
-func TestIsOpenAIImageModelName(t *testing.T) {
-	tests := map[string]bool{
-		"gpt-image":     true,
-		"gpt-image-2":   true,
-		"grok-image":    true,
-		"grok-image-v2": true,
-		"gpt-4o":        false,
+func TestImageModelForPlatform(t *testing.T) {
+	tests := []struct {
+		model, platform string
+		want            bool
+	}{
+		{"gpt-image", PlatformOpenAI, true},
+		{"gpt-image-2", PlatformOpenAI, true},
+		{"grok-image", PlatformOpenAI, true},
+		{"grok-image-v2", PlatformOpenAI, true},
+		{"gpt-4o", PlatformOpenAI, false},
+		{"grok-image-v2", PlatformGrok, true},
+		{"grok-imagine-image-2.0", PlatformGrok, true},
+		{"grok-imagine-edit", PlatformGrok, true},
+		{"xai/grok-imagine-image-quality", PlatformGrok, true},
+		{"grok-imagine-video", PlatformGrok, false},
+		{"grok-4.6", PlatformGrok, false},
+		{"grok-imagine-image-2.0", PlatformOpenAI, false},
+		{"gpt-image-2", PlatformGrok, false},
 	}
-
-	for model, want := range tests {
-		if got := isOpenAIImageModelName(model); got != want {
-			t.Fatalf("isOpenAIImageModelName(%q) = %v, want %v", model, got, want)
+	for _, tt := range tests {
+		if got := isImageModelForPlatform(tt.model, tt.platform); got != tt.want {
+			t.Errorf("isImageModelForPlatform(%q, %q) = %v, want %v", tt.model, tt.platform, got, tt.want)
 		}
+	}
+	models := filterImageModelsForPlatform([]string{"grok-4.6", "grok-imagine-video", "grok-imagine-image-2.0", "grok-imagine-image-2.0"}, PlatformGrok)
+	if len(models) != 1 || models[0] != "grok-imagine-image-2.0" {
+		t.Fatalf("Grok image models = %#v", models)
 	}
 }
 

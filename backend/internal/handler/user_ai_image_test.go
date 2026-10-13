@@ -38,6 +38,149 @@ func TestNormalizeUserAIImageSize(t *testing.T) {
 	}
 }
 
+func TestPrepareGrokImageGenerationAndEdit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(12)
+	apiKeyService := service.NewAPIKeyService(
+		&userAIImageAPIKeyRepoStub{keys: []service.APIKey{{
+			ID: 99, UserID: 7, Key: "sk-user-ai-internal", Source: service.APIKeySourceUserAI,
+			GroupID: &groupID, Status: service.StatusAPIKeyActive,
+		}}},
+		&userAIImageUserRepoStub{},
+		&userAIImageGroupRepoStub{groups: []service.Group{{
+			ID: groupID, Name: "grok-images", Platform: service.PlatformGrok, Status: service.StatusActive,
+		}}},
+		&userAIImageSubscriptionRepoStub{}, nil, nil, &config.Config{},
+	)
+	uploadRoot := t.TempDir()
+	userDir := filepath.Join(uploadRoot, "7")
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "source.png"), tinyPNG(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "second.png"), tinyPNG(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h := &UserAIHandler{
+		userAIService: service.NewUserAIService(&userAIImageRepoStub{}, apiKeyService, nil),
+		uploadRoot:    uploadRoot, uploadPublicRoot: userAIUploadPublicRoot,
+		uploadMaxFileSize: userAIUploadMaxFileSize,
+	}
+
+	tests := []struct {
+		name, route, body, wantPath string
+		prepare                     func(*gin.Context)
+		wantEdit                    bool
+	}{
+		{
+			name: "generate", route: "/api/v1/user/images/generations",
+			body:     `{"prompt":"draw a mountain","model":"grok-imagine-image-2.0","size":"16:9","group_id":12}`,
+			wantPath: "/v1/images/generations", prepare: h.PrepareImageGenerationsProxy,
+		},
+		{
+			name: "edit", route: "/api/v1/user/images/edits",
+			body:     `{"prompt":"add snow","model":"grok-imagine-image-2.0","group_id":12,"image_urls":["/uploads/user_ai/7/source.png"]}`,
+			wantPath: "/v1/images/edits", prepare: h.PrepareImageEditsProxy, wantEdit: true,
+		},
+		{
+			name: "edit multiple images", route: "/api/v1/user/images/edits",
+			body:     `{"prompt":"combine scenes","model":"grok-imagine-image-2.0","group_id":12,"image_urls":["/uploads/user_ai/7/source.png","/uploads/user_ai/7/second.png"]}`,
+			wantPath: "/v1/images/edits", prepare: h.PrepareImageEditsProxy, wantEdit: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			router := gin.New()
+			router.POST(tt.route, func(c *gin.Context) {
+				c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 7})
+			}, tt.prepare, func(c *gin.Context) {
+				if c.Request.URL.Path != tt.wantPath {
+					t.Errorf("path = %q", c.Request.URL.Path)
+				}
+				if c.GetHeader("Content-Type") != "application/json" {
+					t.Errorf("content type = %q", c.GetHeader("Content-Type"))
+				}
+				body, err := io.ReadAll(c.Request.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var payload map[string]any
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatal(err)
+				}
+				for _, key := range []string{"quality", "output_format", "moderation", "response_format"} {
+					if _, exists := payload[key]; exists {
+						t.Errorf("Grok request contains OpenAI option %q", key)
+					}
+				}
+				if payload["model"] != "grok-imagine-image-2.0" {
+					t.Errorf("model = %#v", payload["model"])
+				}
+				if tt.wantEdit {
+					images := service.ParseGrokMediaRequest("application/json", body).InputImageURLs
+					wantImages := 1
+					if tt.name == "edit multiple images" {
+						wantImages = 2
+						if _, hasSingleImage := payload["image"]; hasSingleImage {
+							t.Error("multi-image edit duplicates the first image")
+						}
+					}
+					if len(images) != wantImages {
+						t.Errorf("edit image count = %d, want %d", len(images), wantImages)
+					}
+					for _, imageURL := range images {
+						if !strings.HasPrefix(imageURL, "data:image/png;base64,") {
+							t.Errorf("invalid edit image URL: %q", imageURL)
+						}
+					}
+				} else if payload["size"] != "2048x1152" {
+					t.Errorf("size = %#v", payload["size"])
+				}
+				c.Status(http.StatusNoContent)
+			})
+			req := httptest.NewRequest(http.MethodPost, tt.route, strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestImageModelsIncludeEnabledGrokGroups(t *testing.T) {
+	apiKeyService := service.NewAPIKeyService(
+		&userAIImageAPIKeyRepoStub{}, &userAIImageUserRepoStub{},
+		&userAIImageGroupRepoStub{groups: []service.Group{
+			{ID: 12, Name: "grok-images", Platform: service.PlatformGrok, Status: service.StatusActive, AllowImageGeneration: true, DefaultMappedModel: "grok-imagine-image-quality"},
+			{ID: 13, Name: "grok-disabled", Platform: service.PlatformGrok, Status: service.StatusActive, AllowImageGeneration: false},
+			{ID: 14, Name: "openai-images", Platform: service.PlatformOpenAI, Status: service.StatusActive, AllowImageGeneration: true},
+			{ID: 15, Name: "grok-default", Platform: service.PlatformGrok, Status: service.StatusActive, AllowImageGeneration: true},
+		}},
+		&userAIImageSubscriptionRepoStub{}, nil, nil, &config.Config{},
+	)
+	svc := service.NewUserAIService(&userAIImageRepoStub{}, apiKeyService, nil)
+	models, err := svc.ListImageModels(context.Background(), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models.Groups) != 3 {
+		t.Fatalf("image groups = %#v", models.Groups)
+	}
+	if models.Groups[0].Platform != service.PlatformGrok || len(models.Groups[0].Models) != 1 || models.Groups[0].Models[0] != "grok-imagine-image-quality" {
+		t.Errorf("Grok group = %#v", models.Groups[0])
+	}
+	if models.Groups[1].Models[0] != "gpt-image-2" {
+		t.Errorf("OpenAI models = %#v", models.Groups[1].Models)
+	}
+	if len(models.Groups[2].Models) != 1 || models.Groups[2].Models[0] != "grok-imagine-image-2.0" {
+		t.Errorf("default Grok models = %#v", models.Groups[2].Models)
+	}
+}
+
 func TestExtractUserAIImageResults(t *testing.T) {
 	body := []byte(`{"data":[{"url":"https://example.com/a.png"},{"b64_json":"Zm9v"}]}`)
 	got := extractUserAIImageResults(body)
@@ -301,6 +444,72 @@ func TestPrepareImageGenerationsProxyUsesConversationHistoryReferences(t *testin
 	}
 	if !nextCalled {
 		t.Fatal("expected next handler to be called")
+	}
+}
+
+func TestPrepareGrokImageGenerationUsesConversationHistoryReference(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(12)
+	conversationID := int64(42)
+	apiKeyService := service.NewAPIKeyService(
+		&userAIImageAPIKeyRepoStub{keys: []service.APIKey{{
+			ID: 99, UserID: 7, Key: "sk-user-ai-internal", Source: service.APIKeySourceUserAI,
+			GroupID: &groupID, Status: service.StatusAPIKeyActive,
+		}}},
+		&userAIImageUserRepoStub{},
+		&userAIImageGroupRepoStub{groups: []service.Group{{
+			ID: groupID, Name: "grok-images", Platform: service.PlatformGrok, Status: service.StatusActive,
+		}}},
+		&userAIImageSubscriptionRepoStub{}, nil, nil, &config.Config{},
+	)
+	uploadRoot := t.TempDir()
+	userDir := filepath.Join(uploadRoot, "7", "generated")
+	if err := os.MkdirAll(userDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(userDir, "result.png"), tinyPNG(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	h := &UserAIHandler{
+		userAIService: service.NewUserAIService(&userAIImageConversationRepoStub{
+			conversations: map[int64]*service.ChatConversation{
+				conversationID: {
+					ID: conversationID, UserID: 7,
+					Messages: []service.ChatMessage{{Role: "assistant", Content: `[{"type":"image_url","image_url":{"url":"/uploads/user_ai/7/generated/result.png"}}]`}},
+				},
+			},
+		}, apiKeyService, nil),
+		uploadRoot: uploadRoot, uploadPublicRoot: userAIUploadPublicRoot,
+		uploadMaxFileSize: userAIUploadMaxFileSize,
+	}
+	router := gin.New()
+	router.POST("/api/v1/user/images/generations", func(c *gin.Context) {
+		c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 7})
+	}, h.PrepareImageGenerationsProxy, func(c *gin.Context) {
+		if c.Request.URL.Path != "/v1/images/edits" || c.GetHeader("Content-Type") != "application/json" {
+			t.Errorf("Grok continuation path = %q, content type = %q", c.Request.URL.Path, c.GetHeader("Content-Type"))
+		}
+		body, err := io.ReadAll(c.Request.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info := service.ParseGrokMediaRequest("application/json", body)
+		if len(info.InputImageURLs) != 1 || !strings.HasPrefix(info.InputImageURLs[0], "data:image/png;base64,") {
+			t.Errorf("Grok continuation images = %#v", info.InputImageURLs)
+		}
+		if !strings.Contains(info.Prompt, "add a sunset") {
+			t.Errorf("Grok continuation prompt = %q", info.Prompt)
+		}
+		c.Status(http.StatusNoContent)
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/user/images/generations", strings.NewReader(
+		`{"prompt":"add a sunset","model":"grok-imagine-image-2.0","group_id":12,"conversation_id":42}`,
+	))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

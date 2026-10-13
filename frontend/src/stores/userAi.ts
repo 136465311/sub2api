@@ -4,6 +4,7 @@ import { i18n } from '@/i18n'
 import { userAiAPI, type AIChatMessage, type AIConversation, type AIImageGenerationImage, type AIImageHistoryItem, type AIModelGroup, type ChatCompletionMessage, type ChatMessageContent } from '@/api/userAi'
 import { extractApiErrorMessage } from '@/utils/apiError'
 import { useAppStore } from '@/stores/app'
+import { isImageModel } from '@/utils/aiImageModel'
 
 export type UserAIImageSize = 'auto' | '1:1' | '16:9' | '9:16'
 
@@ -73,11 +74,6 @@ function nextTaskId(prefix: string): string {
 function isRequestCanceled(err: unknown): boolean {
   const record = err as { name?: string; code?: string }
   return record?.name === 'AbortError' || record?.name === 'CanceledError' || record?.code === 'ERR_CANCELED'
-}
-
-function isImageModel(model: string): boolean {
-  const normalized = model.trim().toLowerCase()
-  return normalized === 'gpt-image' || normalized.startsWith('gpt-image-') || normalized.startsWith('grok-image')
 }
 
 function serializeChatContent(content: ChatMessageContent): string {

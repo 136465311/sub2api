@@ -11,6 +11,7 @@ import (
 
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
 
 var (
@@ -174,7 +175,8 @@ func (s *UserAIService) ListImageModels(ctx context.Context, userID int64) (*AIM
 	result := &AIModelsResult{Groups: make([]AIModelGroup, 0, len(groups))}
 	for i := range groups {
 		group := groups[i]
-		if strings.TrimSpace(group.Platform) != PlatformOpenAI {
+		platform := strings.TrimSpace(group.Platform)
+		if platform != PlatformOpenAI && platform != PlatformGrok {
 			continue
 		}
 		if !GroupAllowsImageGeneration(&group) {
@@ -184,13 +186,17 @@ func (s *UserAIService) ListImageModels(ctx context.Context, userID int64) (*AIM
 		groupID := group.ID
 		models := []string(nil)
 		if s.gatewayService != nil {
-			models = filterImageModels(s.gatewayService.GetAvailableModels(ctx, &groupID, group.Platform))
+			models = filterImageModelsForPlatform(s.gatewayService.GetAvailableModels(ctx, &groupID, platform), platform)
 		}
-		if len(models) == 0 && isOpenAIImageModelName(group.DefaultMappedModel) {
+		if len(models) == 0 && isImageModelForPlatform(group.DefaultMappedModel, platform) {
 			models = []string{strings.TrimSpace(group.DefaultMappedModel)}
 		}
 		if len(models) == 0 {
-			models = []string{"gpt-image-2"}
+			if platform == PlatformGrok {
+				models = []string{xai.DefaultImagineImage20Model}
+			} else {
+				models = []string{"gpt-image-2"}
+			}
 		}
 
 		result.Groups = append(result.Groups, AIModelGroup{
@@ -550,7 +556,7 @@ func normalizeConversationTitle(title string) string {
 	return title
 }
 
-func filterImageModels(models []string) []string {
+func filterImageModelsForPlatform(models []string, platform string) []string {
 	if len(models) == 0 {
 		return nil
 	}
@@ -558,7 +564,7 @@ func filterImageModels(models []string) []string {
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		trimmed := strings.TrimSpace(model)
-		if !isOpenAIImageModelName(trimmed) {
+		if !isImageModelForPlatform(trimmed, platform) {
 			continue
 		}
 		key := strings.ToLower(trimmed)
@@ -574,6 +580,16 @@ func filterImageModels(models []string) []string {
 func isOpenAIImageModelName(model string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(model))
 	return normalized == "gpt-image" || strings.HasPrefix(normalized, "gpt-image-") || strings.HasPrefix(normalized, "grok-image")
+}
+
+func isImageModelForPlatform(model, platform string) bool {
+	if platform == PlatformGrok {
+		normalized := strings.ToLower(xai.StripGrokProviderPrefix(model))
+		return normalized == "grok-imagine" || normalized == "grok-imagine-1" ||
+			normalized == "grok-imagine-edit" || normalized == "grok-image" ||
+			strings.HasPrefix(normalized, "grok-image-") || strings.HasPrefix(normalized, "grok-imagine-image")
+	}
+	return platform == PlatformOpenAI && isOpenAIImageModelName(model)
 }
 
 func compactStrings(values []string) []string {
