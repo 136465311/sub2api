@@ -1,7 +1,6 @@
 package routes
 
 import (
-	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -14,11 +13,8 @@ func RegisterUserRoutes(
 	v1 *gin.RouterGroup,
 	h *handler.Handlers,
 	jwtAuth middleware.JWTAuthMiddleware,
-	apiKeyAuth middleware.APIKeyAuthMiddleware,
 	auditLog middleware.AuditLogMiddleware,
-	opsService *service.OpsService,
 	settingService *service.SettingService,
-	cfg *config.Config,
 	panelRateLimiter *middleware.PanelRateLimiter,
 ) {
 	authenticated := v1.Group("")
@@ -33,6 +29,13 @@ func RegisterUserRoutes(
 		user := authenticated.Group("/user")
 		{
 			user.GET("/profile", h.User.GetProfile)
+			if h.MCPOAuth != nil {
+				user.GET("/mcp/config", h.MCPOAuth.ConnectionConfig)
+				user.GET("/mcp/grants", h.MCPOAuth.ListGrants)
+				user.DELETE("/mcp/grants/:id", h.MCPOAuth.RevokeGrant)
+				user.GET("/mcp/authorize", h.MCPOAuth.Preview)
+				user.POST("/mcp/authorize", h.MCPOAuth.Decide)
+			}
 			user.PUT("/password", h.User.ChangePassword)
 			user.PUT("", h.User.UpdateProfile)
 			user.GET("/aff", h.User.GetAffiliate)
@@ -43,58 +46,6 @@ func RegisterUserRoutes(
 			user.POST("/auth-identities/bind/start", h.User.StartIdentityBinding)
 			user.GET("/api-keys/:id/usage/daily", panelRateLimiter.Heavy(), h.Usage.GetMyAPIKeyDailyUsage)
 			user.GET("/platform-quotas", h.User.GetMyPlatformQuotas)
-			user.GET("/ai/models", h.UserAI.Models)
-			user.GET("/images/models", h.UserAI.ImageModels)
-			user.GET("/image/history", h.UserAI.ListImageHistory)
-
-			files := user.Group("/files")
-			{
-				files.POST("/upload", middleware.RequestBodyLimit(handler.UserAIUploadRequestBodyLimit), h.UserAI.UploadImage)
-			}
-
-			chat := user.Group("/chat")
-			{
-				chat.GET("/conversations", h.UserAI.ListChatConversations)
-				chat.POST("/conversations", h.UserAI.CreateChatConversation)
-				chat.PATCH("/conversations/:id/title", h.UserAI.UpdateChatConversationTitle)
-				chat.DELETE("/conversations/:id", h.UserAI.DeleteChatConversation)
-			}
-
-			bodyLimit := middleware.RequestBodyLimit(cfg.Gateway.MaxBodySize)
-			clientRequestID := middleware.ClientRequestID()
-			opsErrorLogger := handler.OpsErrorLoggerMiddleware(opsService)
-			endpointNorm := handler.InboundEndpointMiddleware()
-			requireGroupAnthropic := middleware.RequireGroupAssignment(settingService, middleware.AnthropicErrorWriter)
-			user.POST("/chat/completions",
-				bodyLimit,
-				clientRequestID,
-				opsErrorLogger,
-				endpointNorm,
-				h.UserAI.PrepareChatCompletionsProxy,
-				gin.HandlerFunc(apiKeyAuth),
-				requireGroupAnthropic,
-				h.UserAI.ChatCompletions,
-			)
-			user.POST("/images/generations",
-				bodyLimit,
-				clientRequestID,
-				opsErrorLogger,
-				endpointNorm,
-				h.UserAI.PrepareImageGenerationsProxy,
-				gin.HandlerFunc(apiKeyAuth),
-				requireGroupAnthropic,
-				h.UserAI.ImageGenerations,
-			)
-			user.POST("/images/edits",
-				bodyLimit,
-				clientRequestID,
-				opsErrorLogger,
-				endpointNorm,
-				h.UserAI.PrepareImageEditsProxy,
-				gin.HandlerFunc(apiKeyAuth),
-				requireGroupAnthropic,
-				h.UserAI.ImageGenerations,
-			)
 
 			// 通知邮箱管理
 			notifyEmail := user.Group("/notify-email")

@@ -173,7 +173,16 @@ func filterAPIKeyStubKeys(userID int64, keys []APIKey, filters APIKeyListFilters
 }
 
 func (s *apiKeyRepoStub) VerifyOwnership(ctx context.Context, userID int64, apiKeyIDs []int64) ([]int64, error) {
-	panic("unexpected VerifyOwnership call")
+	if s.getByIDErr != nil {
+		return nil, s.getByIDErr
+	}
+	owned := make([]int64, 0)
+	for _, id := range apiKeyIDs {
+		if s.apiKey != nil && s.apiKey.ID == id && s.apiKey.UserID == userID && s.apiKey.Source != APIKeySourceUserAI {
+			owned = append(owned, id)
+		}
+	}
+	return owned, nil
 }
 
 func (s *apiKeyRepoStub) CountByUserID(ctx context.Context, userID int64) (int64, error) {

@@ -33,7 +33,7 @@ func lifecycleClient(t *testing.T, srv *httptest.Server, withTLS bool) (*httpUps
 	} else {
 		entry, err = s.acquireClientWithProfile("", 1, 1, service.HTTPUpstreamProfileDefault)
 		if err == nil {
-			atomic.AddInt64(&entry.inFlight, -1)
+			entry.inFlight.Add(-1)
 		}
 	}
 	require.NoError(t, err)
@@ -58,7 +58,7 @@ func requireNoUpstreamInFlight(t *testing.T, s *httpUpstreamService) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, entry := range s.clients {
-		require.Zero(t, atomic.LoadInt64(&entry.inFlight))
+		require.Zero(t, entry.inFlight.Load())
 	}
 }
 

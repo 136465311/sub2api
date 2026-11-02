@@ -30,6 +30,16 @@ func (s *updateFieldsAPIKeyRepoStub) GetByID(context.Context, int64) (*APIKey, e
 	return &clone, nil
 }
 
+func (s *updateFieldsAPIKeyRepoStub) VerifyOwnership(_ context.Context, userID int64, ids []int64) ([]int64, error) {
+	owned := make([]int64, 0)
+	for _, id := range ids {
+		if s.key != nil && s.key.ID == id && s.key.UserID == userID && s.key.Source != APIKeySourceUserAI {
+			owned = append(owned, id)
+		}
+	}
+	return owned, nil
+}
+
 func (s *updateFieldsAPIKeyRepoStub) Update(_ context.Context, _ *APIKey, fields APIKeyUpdateFields) error {
 	s.updateFields = append(s.updateFields, fields)
 	return nil
