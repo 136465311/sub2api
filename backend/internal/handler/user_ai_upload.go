@@ -46,7 +46,8 @@ func (h *UserAIHandler) UploadImage(c *gin.Context) {
 
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
-		if _, ok := extractMaxBytesError(err); ok {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
 			response.Error(c, http.StatusRequestEntityTooLarge, "Image must be 20MB or smaller")
 			return
 		}

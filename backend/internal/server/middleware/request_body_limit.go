@@ -35,8 +35,13 @@ func (r *requestBodyReadCounter) BytesRead() int64 {
 
 // RequestBodyLimit uses MaxBytesReader to cap request bodies and logs the
 // observed body size for gateway diagnostics.
-func RequestBodyLimit(maxBytes int64) gin.HandlerFunc {
+func RequestBodyLimit(maxBytes int64, budgets ...*pkghttputil.BodyMemoryBudget) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		if c.Request != nil && len(budgets) > 0 {
+			ctx, release := pkghttputil.WithRequestBodyMemoryBudget(c.Request.Context(), budgets[0])
+			defer release()
+			c.Request = c.Request.WithContext(ctx)
+		}
 		var counter *requestBodyReadCounter
 		if c.Request != nil && c.Request.Body != nil {
 			counter = &requestBodyReadCounter{ReadCloser: c.Request.Body}
