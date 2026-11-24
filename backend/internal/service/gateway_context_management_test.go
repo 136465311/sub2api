@@ -22,14 +22,8 @@ import (
 // 背景
 // ============================================================================
 //
-// Anthropic 上游对 body.context_management 字段实施 Pydantic schema 校验：
-// 当且仅当 anthropic-beta header 含 context-management-2025-06-27 时接受。
-// 否则报：
-//   "context_management: Extra inputs are not permitted"
-//
-// 本仓采用能力维度对称约束（与 Bedrock 路径的 sanitizeBedrockFieldsForBetaTokens
-// 对称）：在所有 Anthropic 直连出口，按最终 anthropic-beta header 是否含上述 token
-// 决定 body 是否保留同名字段。
+// Anthropic 直连请求应保留 body.context_management，包括最终 anthropic-beta
+// header 未含 context-management-2025-06-27 的情况。Bedrock 使用独立的字段过滤规则。
 //
 // 本文件覆盖：
 //   1) sanitizeAnthropicBodyForBetaTokens 纯函数
@@ -89,19 +83,19 @@ func TestSanitizeAnthropicBodyForBetaTokens_FieldKeptWhenBetaPresent(t *testing.
 		gjson.GetBytes(out, "context_management.edits.0.type").String())
 }
 
-func TestSanitizeAnthropicBodyForBetaTokens_FieldStrippedWhenBetaMissing(t *testing.T) {
+func TestSanitizeAnthropicBodyForBetaTokens_ContextManagementPreservedWhenBetaMissing(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","context_management":{"edits":[{"type":"clear_thinking_20251015"}]},"messages":[]}`)
 	out, changed := sanitizeAnthropicBodyForBetaTokens(body, "oauth-2025-04-20,interleaved-thinking-2025-05-14")
-	require.True(t, changed)
-	require.False(t, gjson.GetBytes(out, "context_management").Exists(),
-		"header 不含 context-management beta 时必须 strip 同名字段")
+	require.False(t, changed)
+	require.True(t, gjson.GetBytes(out, "context_management").Exists(),
+		"Anthropic 直连请求必须保留 context_management，即使 header 未带对应 beta")
 }
 
-func TestSanitizeAnthropicBodyForBetaTokens_FieldStrippedWhenBetaEmpty(t *testing.T) {
+func TestSanitizeAnthropicBodyForBetaTokens_ContextManagementPreservedWhenBetaEmpty(t *testing.T) {
 	body := []byte(`{"context_management":{"edits":[]},"messages":[]}`)
 	out, changed := sanitizeAnthropicBodyForBetaTokens(body, "")
-	require.True(t, changed)
-	require.False(t, gjson.GetBytes(out, "context_management").Exists())
+	require.False(t, changed)
+	require.True(t, gjson.GetBytes(out, "context_management").Exists())
 }
 
 func TestSanitizeAnthropicBodyForBetaTokens_EmptyBody(t *testing.T) {
@@ -323,9 +317,8 @@ func TestComputeFinalCountTokensAnthropicBeta_OAuthTransparent_AppendsBetaTokenC
 // normalizeClaudeOAuthRequestBody — 回归：context_management 补齐恢复原行为
 // ============================================================================
 //
-// 重构后该函数不再按 model 名短路：thinking=enabled/adaptive 时补齐 context_management，
-// 与 model 无关。strip 责任移交 sanitizeAnthropicBodyForBetaTokens（在
-// buildUpstreamRequest 层按最终 beta header 执行）。
+// thinking=enabled/adaptive 时补齐 context_management，与 model 无关；Anthropic 直连
+// 请求构造阶段也会保留该字段。
 
 func TestNormalizeClaudeOAuthRequestBody_InjectsContextManagement_ThinkingEnabled(t *testing.T) {
 	body := []byte(`{"model":"claude-sonnet-4-6","thinking":{"type":"enabled","budget_tokens":1000},"messages":[]}`)
@@ -341,13 +334,12 @@ func TestNormalizeClaudeOAuthRequestBody_InjectsContextManagement_ThinkingAdapti
 	require.True(t, gjson.GetBytes(out, "context_management").Exists())
 }
 
-func TestNormalizeClaudeOAuthRequestBody_HaikuStillInjects_StripDeferredToSanitize(t *testing.T) {
-	// Haiku + thinking=enabled：normalize 阶段仍按 CLI mimicry 行为补齐字段；
-	// 最终是否保留仍由 beta 能力对称的 sanitize 统一决定。
+func TestNormalizeClaudeOAuthRequestBody_HaikuStillInjects(t *testing.T) {
+	// Haiku + thinking=enabled：normalize 阶段按 CLI mimicry 行为补齐字段。
 	body := []byte(`{"model":"claude-haiku-4-5","thinking":{"type":"enabled","budget_tokens":1000},"messages":[]}`)
 	out, _ := normalizeClaudeOAuthRequestBody(body, "claude-haiku-4-5", claudeOAuthNormalizeOptions{})
 	require.True(t, gjson.GetBytes(out, "context_management").Exists(),
-		"normalize 不再按 model 名短路；strip 责任移交 sanitize 层")
+		"normalize 不按 model 名过滤 context_management")
 }
 
 func TestNormalizeClaudeOAuthRequestBody_PreservesClientContextManagement(t *testing.T) {
@@ -457,7 +449,7 @@ func readUpstreamBodyForTest(t *testing.T, req *http.Request) []byte {
 	return b
 }
 
-func TestBuildUpstreamRequestAnthropicAPIKeyPassthrough_StripsContextManagementWhenClientHeaderMissingBeta(t *testing.T) {
+func TestBuildUpstreamRequestAnthropicAPIKeyPassthrough_PreservesContextManagementWhenClientHeaderMissingBeta(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -471,8 +463,8 @@ func TestBuildUpstreamRequestAnthropicAPIKeyPassthrough_StripsContextManagementW
 		context.Background(), c, newAnthropicAPIKeyPassthroughAccountForBetaTest(), body, "token",
 	)
 	require.NoError(t, err)
-	require.False(t, gjson.GetBytes(readUpstreamBodyForTest(t, req), "context_management").Exists(),
-		"API-key passthrough + 客户端未带 context-management beta → strip body 字段")
+	require.True(t, gjson.GetBytes(readUpstreamBodyForTest(t, req), "context_management").Exists(),
+		"API-key passthrough 必须保留 context_management")
 }
 
 func TestBuildUpstreamRequestAnthropicAPIKeyPassthrough_PreservesContextManagementWhenClientHeaderHasBeta(t *testing.T) {
@@ -492,7 +484,7 @@ func TestBuildUpstreamRequestAnthropicAPIKeyPassthrough_PreservesContextManageme
 		"API-key passthrough + 客户端带 context-management beta → 字段保留（不过度删除）")
 }
 
-func TestBuildCountTokensRequestAnthropicAPIKeyPassthrough_StripsContextManagementWhenClientHeaderMissingBeta(t *testing.T) {
+func TestBuildCountTokensRequestAnthropicAPIKeyPassthrough_PreservesContextManagementWhenClientHeaderMissingBeta(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -505,14 +497,14 @@ func TestBuildCountTokensRequestAnthropicAPIKeyPassthrough_StripsContextManageme
 		context.Background(), c, newAnthropicAPIKeyPassthroughAccountForBetaTest(), body, "token",
 	)
 	require.NoError(t, err)
-	require.False(t, gjson.GetBytes(readUpstreamBodyForTest(t, req), "context_management").Exists(),
-		"count_tokens passthrough + 客户端未带 context-management beta → strip")
+	require.True(t, gjson.GetBytes(readUpstreamBodyForTest(t, req), "context_management").Exists(),
+		"count_tokens passthrough 必须保留 context_management")
 }
 
 // ============================================================================
 // 集成测试：buildUpstreamRequest
-// 全路径验证上游 outgoing body 与 anthropic-beta header 严格对称。
-// 这个测试能挡住未来某人忘调 sanitize / 将 sanitize 挪到 CCH 之后 等 regression。
+// 全路径验证 context_management 的透传行为与 beta header 处理彼此独立。
+// 这能防止请求构造阶段再次因 header 缺 token 而删除该字段。
 // ============================================================================
 
 func TestBuildUpstreamRequest_OAuthMimicHaiku_PreservesContextManagementEndToEnd(t *testing.T) {
@@ -694,8 +686,8 @@ func TestBuildCountTokensRequest_OAuthMimic_DropsInjectedMaxTokens(t *testing.T)
 		"count_tokens wire body must not contain max_tokens")
 }
 
-func TestBuildCountTokensRequest_APIKeyHaiku_StripsContextManagementEndToEnd(t *testing.T) {
-	// API-key + haiku + 客户端 header 不带 context-management beta → final beta 不含 → strip
+func TestBuildCountTokensRequest_APIKeyHaiku_PreservesContextManagementEndToEnd(t *testing.T) {
+	// API-key + haiku 即使客户端 header 未带 context-management beta 也保留字段。
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -715,8 +707,8 @@ func TestBuildCountTokensRequest_APIKeyHaiku_StripsContextManagementEndToEnd(t *
 	require.NoError(t, err)
 
 	outBody := readUpstreamBodyForTest(t, req)
-	require.False(t, gjson.GetBytes(outBody, "context_management").Exists(),
-		"count_tokens API-key + 客户端未带 beta token → body strip")
+	require.True(t, gjson.GetBytes(outBody, "context_management").Exists(),
+		"count_tokens API-key 请求必须保留 context_management")
 }
 
 func TestBuildCountTokensRequest_StripsCacheControlOnlyFromLiteralDeferredTools(t *testing.T) {
@@ -782,9 +774,8 @@ func TestBuildCountTokensRequestAnthropicAPIKeyPassthrough_PreservesContextManag
 		"count_tokens passthrough + 客户端带 context-management beta → 字段保留")
 }
 
-func TestBuildUpstreamRequest_APIKeyHaikuWithContextManagement_StripsField(t *testing.T) {
-	// API-key + haiku + body 带 context_management + 客户端 header 未带 context-management beta
-	// → final beta 不含 → body 字段被 strip
+func TestBuildUpstreamRequest_APIKeyHaikuWithContextManagement_PreservesField(t *testing.T) {
+	// API-key + haiku 即使客户端 header 未带 context-management beta 也保留字段。
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -804,6 +795,6 @@ func TestBuildUpstreamRequest_APIKeyHaikuWithContextManagement_StripsField(t *te
 	require.NoError(t, err)
 
 	outBody := readUpstreamBodyForTest(t, req)
-	require.False(t, gjson.GetBytes(outBody, "context_management").Exists(),
-		"API-key + haiku + 客户端未带 beta token → body 字段必须被 strip")
+	require.True(t, gjson.GetBytes(outBody, "context_management").Exists(),
+		"API-key + haiku 请求必须保留 context_management")
 }

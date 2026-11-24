@@ -67,11 +67,8 @@ func readRequestBodyForTest(t *testing.T, req *http.Request) []byte {
 	return body
 }
 
-// Vertex 路径回归保护：同样需要
-// body↔beta header 能力维度对称。客户端 header 不带 context-management beta
-// 但 body 带 context_management 字段 → Vertex builder 必须 strip 字段，与 Anthropic
-// 直连 / Bedrock 路径保持一致。
-func TestGatewayService_BuildAnthropicVertexServiceAccount_StripsContextManagementWhenBetaMissing(t *testing.T) {
+// Vertex 路径应保留 context_management，即使客户端 header 未带对应 beta。
+func TestGatewayService_BuildAnthropicVertexServiceAccount_PreservesContextManagementWhenBetaMissing(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
@@ -94,12 +91,11 @@ func TestGatewayService_BuildAnthropicVertexServiceAccount_StripsContextManageme
 	require.NoError(t, err)
 
 	got := readRequestBodyForTest(t, req)
-	require.False(t, gjson.GetBytes(got, "context_management").Exists(),
-		"Vertex 路径下客户端 header 缺 context-management beta 时，必须 strip body 同名字段")
-	// header 对称断言：覆盖未来某人在 Vertex builder 里加入与 sanitize 不一致的 header 处理。
+	require.True(t, gjson.GetBytes(got, "context_management").Exists(),
+		"Vertex 路径必须保留 body 中的 context_management")
 	outBeta := getHeaderRaw(req.Header, "anthropic-beta")
 	require.False(t, anthropicBetaTokensContains(outBeta, "context-management-2025-06-27"),
-		"与 body 对称：outgoing anthropic-beta header 也不含 context-management beta")
+		"该回归只改变 body 字段透传，不额外注入 beta header")
 }
 
 // Vertex 路径反面：客户端 header 含 context-management beta 时保留字段。

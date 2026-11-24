@@ -671,8 +671,9 @@ func filterBedrockBetaTokens(tokens []string) []string {
 	return result
 }
 
-// sanitizeBedrockFieldsForBetaTokens 与直连路径的 sanitizeAnthropicBodyForBetaTokens
-// 对称：按最终 Bedrock beta tokens 决定是否保留 body 中的 beta 字段。
+// sanitizeBedrockFieldsForBetaTokens 按最终 Bedrock beta tokens 决定是否保留
+// Bedrock Invoke 支持的 beta 专属 body 字段。context_management 在 Anthropic 直连
+// 路径会透传，但 Bedrock Invoke 不支持时仍需在此剥除。
 //   - context_management 缺 context-management beta → strip
 //   - fallbacks 缺 server-side-fallback beta → strip
 //   - fallback_credit_token 缺 server-side-fallback / 任一 fallback-credit beta → strip

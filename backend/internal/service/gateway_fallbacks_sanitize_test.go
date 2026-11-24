@@ -30,13 +30,12 @@ import (
 // fallbacks 是 beta Messages API 的 server-side refusal fallback 字段；本仓
 // 不写入该字段，全部来自客户端（Claude Code / SDK / OpenCode 等）透传。
 // OAuth mimic 用 FullClaudeCodeMimicryBetas 覆盖客户端 beta（不含 fallback
-// beta），因此必须在出口按最终 beta header 条件 strip，与 context_management
-// 的对称约束同构。策略是"剥字段，不注入 beta"：fallback 会换模型、改计费，
+// beta），因此必须在出口按最终 beta header 条件 strip。策略是"剥字段，不注入 beta"：fallback 会换模型、改计费，
 // 不允许当默认打开。
 //
 // 本文件覆盖：
 //   1) sanitizeAnthropicBodyForBetaTokens 对 fallbacks / fallback_credit_token
-//      的条件 strip（以及与 context_management 的组合行为）
+//      的条件 strip（同时确保 context_management 不受影响）
 //   2) buildUpstreamRequest OAuth mimic / API-key passthrough 端到端
 //   3) Bedrock 路径的对称 strip（PrepareBedrockRequestBodyWithTokens /
 //      sanitizeBedrockCCFields）
@@ -110,14 +109,13 @@ func TestSanitizeAnthropicBodyForBetaTokens_FallbackCreditTokenKeptWithAnyAccept
 	}
 }
 
-// ★ 组合场景：只带 context-management beta → 剥 fallbacks，保留 context_management
-// （守住"早退导致 fallbacks 漏洗"与"过度删除 context_management"两个方向的回归）
-func TestSanitizeAnthropicBodyForBetaTokens_StripsFallbacksKeepsContextManagement(t *testing.T) {
+// context_management 不应因缺少对应 beta 而被删除；fallbacks 仍按其自己的 beta 过滤。
+func TestSanitizeAnthropicBodyForBetaTokens_StripsFallbacksKeepsContextManagementWithoutBeta(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","context_management":{"edits":[{"type":"clear_thinking_20251015"}]},"fallbacks":"default","messages":[]}`)
-	out, changed := sanitizeAnthropicBodyForBetaTokens(body, "context-management-2025-06-27")
+	out, changed := sanitizeAnthropicBodyForBetaTokens(body, "oauth-2025-04-20")
 	require.True(t, changed)
 	require.False(t, gjson.GetBytes(out, "fallbacks").Exists(),
-		"header 只有 context-management beta → fallbacks 必须 strip")
+		"header 缺少 server-side-fallback beta → fallbacks 必须 strip")
 	require.True(t, gjson.GetBytes(out, "context_management").Exists(),
 		"context-management beta 在 header 中 → context_management 不得被误删")
 }

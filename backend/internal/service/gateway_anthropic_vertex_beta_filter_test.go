@@ -102,10 +102,8 @@ func TestVertexBetaFilter_DropsHeaderWhenAllUnsupported(t *testing.T) {
 		"所有 token 被剥离后不应残留 anthropic-beta header")
 }
 
-// 能力维度 sanitize 以「最终 beta」为准：客户端只带不支持的 prompt-caching-scope（会被剥光），
-// body 又带 context_management → 因最终 header 不含 context-management beta，body 字段必须 strip。
-// 证明 sanitize 不再以原始 client 值为准（修复前用 clientBeta，会错误保留 context_management）。
-func TestVertexBetaFilter_BodySanitizeKeysOnFinalBeta(t *testing.T) {
+// beta policy 过滤 header 后，Vertex 路径仍需保留 context_management body 字段。
+func TestVertexBetaFilter_PreservesContextManagementWhenFinalBetaMissing(t *testing.T) {
 	c := newVertexBetaTestContext(t, "prompt-caching-scope-2026-01-05")
 
 	body := []byte(`{"model":"claude-opus-4-7","context_management":{"edits":[{"type":"clear_thinking_20251015"}]},"messages":[{"role":"user","content":"hi"}]}`)
@@ -118,8 +116,8 @@ func TestVertexBetaFilter_BodySanitizeKeysOnFinalBeta(t *testing.T) {
 	require.NoError(t, err)
 
 	got := readRequestBodyForTest(t, req)
-	require.False(t, gjson.GetBytes(got, "context_management").Exists(),
-		"最终 beta 不含 context-management 时 body.context_management 必须被 strip")
+	require.True(t, gjson.GetBytes(got, "context_management").Exists(),
+		"最终 beta 不含 context-management 时也要保留 body.context_management")
 	require.Empty(t, getHeaderRaw(req.Header, "anthropic-beta"))
 }
 
